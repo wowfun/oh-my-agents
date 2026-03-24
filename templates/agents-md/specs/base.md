@@ -1,0 +1,3 @@
+- 规格先行，在代码实现前，永远记得先 READ/UPDATE/CREATE specs/<topic>/spec.md
+- 实现落地后更新 specs/CHANGELOG.md（仅主要变更）
+- Conventional Commits (feat|fix|refactor|build|ci|chore|docs|style|perf|test).

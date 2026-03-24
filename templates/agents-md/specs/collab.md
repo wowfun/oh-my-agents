@@ -1,0 +1,1 @@
+- Always commit files in `specs/` separately. Unless explicitly required, keep them ONLY on the local-* branch.
