@@ -53,3 +53,18 @@ ref = "md"
 
 [source.archify.remote]
 url = "https://github.com/tt-a1i/archify"
+
+[source.claude-plugins-official]
+
+[source.claude-plugins-official.remote]
+url = "https://github.com/anthropics/claude-plugins-official"
+
+[source.ELI5]
+
+[source.ELI5.remote]
+url = "https://github.com/DreambigOu/ELI5.git"
+
+[source.reclaim-code-entropy]
+
+[source.reclaim-code-entropy.remote]
+url = "https://github.com/Yevanchen/reclaim-code-entropy.git"

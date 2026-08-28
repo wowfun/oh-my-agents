@@ -8,3 +8,9 @@ description = "Content creation profile."
 [skill.guizang-ppt-skill]
 
 [skill.archify]
+
+[skill.ELI5]
+include = ["eli5"]
+
+[skill.Waza]
+include = ["skills/write"]
