@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 
 from hagency_cli import cli
 from hagency_cli import common as common_module
+from hagency_cli import profile_ui as profile_ui_module
 from hagency_cli import profiles as profile_module
 from hagency_cli import sources as source_module
 from hagency_cli.space import purge as purge_module
@@ -2736,7 +2737,52 @@ class CliTests(unittest.TestCase):
         self.assertIn("--link-mode junction", stderr)
         self.assertIn("-cp", stderr)
 
-    def test_duplicate_discovered_skill_names_fail_with_prefix_guidance(self) -> None:
+    def test_duplicate_discovered_skill_names_prompt_for_source(self) -> None:
+        selected = self.root / "local-source" / "other" / "external-one"
+        self.write_skill(selected)
+        profile_path = self.root / "profiles" / "content" / "config.toml"
+        profile_path.write_text(
+            textwrap.dedent(
+                """
+                name = "content"
+
+                [skill.local-source]
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+
+        prompt = mock.Mock()
+        prompt.unsafe_ask.return_value = selected
+        with (
+            mock.patch.object(
+                profile_ui_module.QuestionarySkillConflictUI,
+                "is_interactive",
+                return_value=True,
+            ),
+            mock.patch.object(
+                profile_ui_module.questionary, "select", return_value=prompt
+            ) as select,
+        ):
+            stdout, _stderr = self.run_cli(
+                "profile", "init", "-d", str(self.root / "target"), "content"
+            )
+
+        installed = self.root / "target" / ".agents" / "skills" / "external-one"
+        self.assertIn("external-one", stdout)
+        self.assertEqual(installed.resolve(), selected.resolve())
+        select.assert_called_once()
+        choices = select.call_args.kwargs["choices"]
+        self.assertEqual(
+            [choice.value for choice in choices],
+            [
+                self.root / "local-source" / "nested" / "external-one",
+                selected,
+            ],
+        )
+        prompt.unsafe_ask.assert_called_once_with()
+
+    def test_duplicate_discovered_skill_names_fail_without_terminal(self) -> None:
         self.write_skill(self.root / "local-source" / "other" / "external-one")
         profile_path = self.root / "profiles" / "content" / "config.toml"
         profile_path.write_text(
@@ -2750,11 +2796,221 @@ class CliTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        _stdout, stderr = self.run_cli(
-            "profile", "init", "-d", str(self.root / "target"), "content", expected=1
-        )
+        with mock.patch.object(
+            profile_ui_module.QuestionarySkillConflictUI,
+            "is_interactive",
+            return_value=False,
+        ):
+            _stdout, stderr = self.run_cli(
+                "profile",
+                "init",
+                "-d",
+                str(self.root / "target"),
+                "content",
+                expected=1,
+            )
+
         self.assertIn("duplicate discovered skill name", stderr)
-        self.assertIn("more specific path prefix", stderr)
+        self.assertIn("rerun in an interactive terminal", stderr)
+
+    def test_duplicate_discovered_skill_names_dry_run_previews_without_terminal(
+        self,
+    ) -> None:
+        other = self.root / "local-source" / "other" / "external-one"
+        self.write_skill(other)
+        profile_path = self.root / "profiles" / "content" / "config.toml"
+        profile_path.write_text(
+            textwrap.dedent(
+                """
+                name = "content"
+
+                [skill.local-source]
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+
+        with mock.patch.object(
+            profile_ui_module.QuestionarySkillConflictUI,
+            "is_interactive",
+            return_value=False,
+        ):
+            stdout, stderr = self.run_cli(
+                "profile",
+                "init",
+                "-d",
+                str(self.root / "target"),
+                "content",
+                "--dry-run",
+            )
+
+        self.assertEqual(stderr, "")
+        self.assertIn("conflict 'external-one'", stdout)
+        self.assertIn(
+            str(self.root / "local-source" / "nested" / "external-one"), stdout
+        )
+        self.assertIn(str(other), stdout)
+        self.assertFalse((self.root / "target").exists())
+
+    def test_duplicate_discovered_skill_names_across_sources_show_source_labels(
+        self,
+    ) -> None:
+        first = self.root / "local-source" / "nested" / "external-one"
+        second = self.root / "second-source" / "external-one"
+        self.write_skill(second)
+        self.config_path.write_text(
+            textwrap.dedent(
+                """
+                [defaults]
+                checkout_dir = "checkouts"
+
+                [source.local-source]
+                path = "local-source"
+
+                [source.second-source]
+                path = "second-source"
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        profile_path = self.root / "profiles" / "content" / "config.toml"
+        profile_path.write_text(
+            textwrap.dedent(
+                """
+                name = "content"
+
+                [skill.local-source]
+
+                [skill.second-source]
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+
+        prompt = mock.Mock()
+        prompt.unsafe_ask.return_value = second
+        with (
+            mock.patch.object(
+                profile_ui_module.QuestionarySkillConflictUI,
+                "is_interactive",
+                return_value=True,
+            ),
+            mock.patch.object(
+                profile_ui_module.questionary, "select", return_value=prompt
+            ) as select,
+        ):
+            self.run_cli("profile", "init", "-d", str(self.root / "target"), "content")
+
+        choices = select.call_args.kwargs["choices"]
+        self.assertEqual(
+            [choice.title for choice in choices],
+            [f"local-source: {first}", f"second-source: {second}"],
+        )
+        installed = self.root / "target" / ".agents" / "skills" / "external-one"
+        self.assertEqual(installed.resolve(), second.resolve())
+
+    def test_duplicate_discovered_skill_prompt_terminal_error_is_clean(self) -> None:
+        self.write_skill(self.root / "local-source" / "other" / "external-one")
+        profile_path = self.root / "profiles" / "content" / "config.toml"
+        profile_path.write_text(
+            textwrap.dedent(
+                """
+                name = "content"
+
+                [skill.local-source]
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+
+        prompt = mock.Mock()
+        prompt.unsafe_ask.side_effect = OSError("terminal unavailable")
+        with (
+            mock.patch.object(
+                profile_ui_module.QuestionarySkillConflictUI,
+                "is_interactive",
+                return_value=True,
+            ),
+            mock.patch.object(
+                profile_ui_module.questionary, "select", return_value=prompt
+            ),
+        ):
+            _stdout, stderr = self.run_cli(
+                "profile",
+                "init",
+                "-d",
+                str(self.root / "target"),
+                "content",
+                expected=1,
+            )
+
+        self.assertIn("interactive skill source selection failed", stderr)
+        self.assertIn("terminal unavailable", stderr)
+        self.assertFalse((self.root / "target").exists())
+
+    def test_duplicate_discovered_skill_selection_can_be_cancelled(self) -> None:
+        self.write_skill(self.root / "local-source" / "other" / "external-one")
+        profile_path = self.root / "profiles" / "content" / "config.toml"
+        profile_path.write_text(
+            textwrap.dedent(
+                """
+                name = "content"
+
+                [skill.local-source]
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+
+        prompt = mock.Mock()
+        prompt.unsafe_ask.return_value = None
+        with (
+            mock.patch.object(
+                profile_ui_module.QuestionarySkillConflictUI,
+                "is_interactive",
+                return_value=True,
+            ),
+            mock.patch.object(
+                profile_ui_module.questionary, "select", return_value=prompt
+            ),
+        ):
+            _stdout, stderr = self.run_cli(
+                "profile",
+                "init",
+                "-d",
+                str(self.root / "target"),
+                "content",
+                expected=1,
+            )
+
+        self.assertIn("skill source selection cancelled", stderr)
+        self.assertFalse((self.root / "target").exists())
+
+    def test_duplicate_selection_of_same_skill_path_is_deduplicated(self) -> None:
+        profile_path = self.root / "profiles" / "content" / "config.toml"
+        profile_path.write_text(
+            textwrap.dedent(
+                """
+                name = "content"
+
+                [skill.local-source]
+                include = ["*", "nested/external-one"]
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+
+        with mock.patch.object(
+            profile_ui_module.QuestionarySkillConflictUI, "select"
+        ) as select:
+            self.run_cli("profile", "init", "-d", str(self.root / "target"), "content")
+
+        installed = self.root / "target" / ".agents" / "skills" / "external-one"
+        self.assertEqual(
+            installed.resolve(),
+            (self.root / "local-source" / "nested" / "external-one").resolve(),
+        )
+        select.assert_not_called()
 
     def test_skill_include_accepts_prefix_path(self) -> None:
         profile_path = self.root / "profiles" / "content" / "config.toml"

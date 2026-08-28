@@ -4,7 +4,9 @@ import os
 import shlex
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from .common import die, read_toml, write_toml
 from .sources import Source, require_source_path
@@ -22,6 +24,21 @@ SKIP_DISCOVERY_DIRS = {
     "node_modules",
     "target",
 }
+
+
+@dataclass(frozen=True)
+class SkillLinkCandidate:
+    name: str
+    source_name: str
+    target: Path
+
+
+class SkillConflictUI(Protocol):
+    def is_interactive(self) -> bool: ...
+
+    def select(
+        self, name: str, candidates: tuple[SkillLinkCandidate, ...]
+    ) -> Path | None: ...
 
 
 def validate_profile_name(profile_name: str) -> None:
@@ -431,10 +448,17 @@ def workspace_source(workspace_root: Path) -> Source:
     return Source(name="workspace", path=workspace_root, remote=None)
 
 
-def resolve_selector(source: Source, selector: str, *, skip_roots: set[Path] | None = None) -> list[tuple[str, Path]]:
+def resolve_selector(
+    source: Source,
+    selector: str,
+    *,
+    skip_roots: set[Path] | None = None,
+    allow_name_conflicts: bool = False,
+) -> list[tuple[str, Path]]:
     if selector == "*":
         links = discover_skill_links(source, skip_roots=skip_roots)
-        require_unique_link_names(links)
+        if not allow_name_conflicts:
+            require_unique_link_names(links)
         return links
 
     prefix_root = source.path / selector
@@ -445,7 +469,7 @@ def resolve_selector(source: Source, selector: str, *, skip_roots: set[Path] | N
         if not matches:
             die(f"skill selector {selector!r} for source {source.name} matched no candidates")
 
-    if len(matches) > 1:
+    if len(matches) > 1 and not allow_name_conflicts:
         die(
             f"skill selector {selector!r} for source {source.name} matched multiple candidates. "
             f"Use a more specific selector: {format_selector_choices(source, matches)}"
@@ -475,22 +499,106 @@ def validate_profile_skill_selectors(
         resolve_selector(source, selector, skip_roots=skip_roots)
 
 
-def selected_links(config: dict, source: Source, *, skip_roots: set[Path] | None = None) -> list[tuple[str, Path]]:
+def selected_links(
+    config: dict,
+    source: Source,
+    *,
+    skip_roots: set[Path] | None = None,
+    allow_name_conflicts: bool = False,
+) -> list[tuple[str, Path]]:
     includes = config.get("include") or ["*"]
     excludes = set(config.get("exclude") or [])
 
     links: list[tuple[str, Path]] = []
     for item in includes:
-        links.extend(resolve_selector(source, item, skip_roots=skip_roots))
+        links.extend(
+            resolve_selector(
+                source,
+                item,
+                skip_roots=skip_roots,
+                allow_name_conflicts=allow_name_conflicts,
+            )
+        )
 
     excluded_paths: set[Path] = set()
     for item in excludes:
-        for _name, target in resolve_selector(source, item, skip_roots=skip_roots):
+        for _name, target in resolve_selector(
+            source,
+            item,
+            skip_roots=skip_roots,
+            allow_name_conflicts=allow_name_conflicts,
+        ):
             excluded_paths.add(target.resolve())
 
-    filtered = [(name, target) for name, target in links if target.resolve() not in excluded_paths]
-    require_unique_link_names(filtered)
+    filtered = [
+        (name, target)
+        for name, target in links
+        if target.resolve() not in excluded_paths
+    ]
+    if not allow_name_conflicts:
+        require_unique_link_names(filtered)
     return filtered
+
+
+def resolve_link_name_conflicts(
+    links: list[SkillLinkCandidate],
+    conflict_ui: SkillConflictUI | None,
+    *,
+    preview_conflicts: bool = False,
+) -> list[SkillLinkCandidate]:
+    candidates_by_name: dict[str, list[SkillLinkCandidate]] = {}
+    resolved_by_name: dict[str, set[Path]] = {}
+    for link in links:
+        resolved = link.target.resolve()
+        if resolved in resolved_by_name.setdefault(link.name, set()):
+            continue
+        resolved_by_name[link.name].add(resolved)
+        candidates_by_name.setdefault(link.name, []).append(link)
+
+    selected: list[SkillLinkCandidate] = []
+    for name, candidates in candidates_by_name.items():
+        if len(candidates) == 1:
+            selected.append(candidates[0])
+            continue
+
+        if conflict_ui is None or not conflict_ui.is_interactive():
+            if preview_conflicts:
+                print(f"conflict {name!r}: choose one source when running interactively")
+                for candidate in candidates:
+                    print(f"  candidate {candidate.source_name}: {candidate.target}")
+                continue
+            choices = " and ".join(
+                f"{candidate.source_name}: {candidate.target}"
+                for candidate in candidates
+            )
+            die(
+                f"duplicate discovered skill name {name!r}: {choices}; "
+                "rerun in an interactive terminal to choose one or narrow the "
+                "profile's include selector"
+            )
+
+        try:
+            choice = conflict_ui.select(name, tuple(candidates))
+        except (OSError, RuntimeError) as exc:
+            die(
+                f"interactive skill source selection failed for {name!r}: {exc}; "
+                "rerun in a working terminal or narrow the profile's include selector"
+            )
+        if choice is None:
+            die(f"skill source selection cancelled for {name!r}")
+        matching = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate.target.resolve() == choice.resolve()
+            ),
+            None,
+        )
+        if matching is None:
+            die(f"invalid skill source selected for {name!r}: {choice}")
+        selected.append(matching)
+
+    return selected
 
 
 def is_windows_platform() -> bool:
@@ -647,6 +755,7 @@ def init_profile(
     *,
     link_mode: str,
     dry_run: bool,
+    conflict_ui: SkillConflictUI | None = None,
 ) -> None:
     _validate_skills_dir(skills_dir)
     workspace = workspace_source(workspace_root)
@@ -654,13 +763,34 @@ def init_profile(
         die("legacy [[skills]] profile config is no longer supported; use [skill.<source>]")
 
     source_roots = {source.path for source in sources.values()}
-    links: list[tuple[str, Path]] = []
+    links: list[SkillLinkCandidate] = []
     for source_name, config in profile.get("skill", {}).items():
         source = skill_source(source_name, sources, workspace)
         require_source_path(source)
         skip_roots = source_roots if source.name == "workspace" else None
-        links.extend(selected_links(config or {}, source, skip_roots=skip_roots))
+        links.extend(
+            SkillLinkCandidate(
+                name=link_name,
+                source_name=source_name,
+                target=target,
+            )
+            for link_name, target in selected_links(
+                config or {},
+                source,
+                skip_roots=skip_roots,
+                allow_name_conflicts=True,
+            )
+        )
 
-    require_unique_link_names(links)
-    for link_name, target in links:
-        install_skill(skills_dir, link_name, target, link_mode=link_mode, dry_run=dry_run)
+    for link in resolve_link_name_conflicts(
+        links,
+        conflict_ui,
+        preview_conflicts=dry_run,
+    ):
+        install_skill(
+            skills_dir,
+            link.name,
+            link.target,
+            link_mode=link_mode,
+            dry_run=dry_run,
+        )

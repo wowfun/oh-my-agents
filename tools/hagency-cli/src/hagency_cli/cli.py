@@ -394,6 +394,8 @@ def init_profile_command(
     checkout_dir: str | None,
     dry_run: bool,
 ) -> None:
+    from .profile_ui import QuestionarySkillConflictUI
+
     invocation_cwd = Path.cwd()
     root = workspace_root_arg(root_value)
     sources = load_sources(root, checkout_dir)
@@ -412,6 +414,7 @@ def init_profile_command(
         skills_dir,
         link_mode=profile_init_link_mode(copy, link_mode),
         dry_run=dry_run,
+        conflict_ui=QuestionarySkillConflictUI(),
     )
 
 
