@@ -9,3 +9,10 @@ Conduct a comprehensive, in-depth, and adversarial review of all uncommitted cha
 
 Conduct a comprehensive, in-depth, and adversarial audit of <repo>'s architecture, codebase, and test suite, and provide prioritized MUST and SHOULD recommendations, covering areas including, but not limited to:
 ...
+
+---
+
+Conduct a comprehensive, in-depth, and adversarial simplification audit of `<scope>`:
+- Find unused or support-only surfaces, abandoned-feature residue, duplication, speculative generality, pass-through abstractions, needless nesting, redundant lifecycle machinery, misplaced defenses, and hand-rolled infrastructure replaceable by simpler established mechanisms.
+- Reject changes that merely move complexity, reduce clarity, or alter required behavior.
+- Preserve trust-boundary validation, security and accessibility controls, data safety, resource cleanup, and intentional seams.
