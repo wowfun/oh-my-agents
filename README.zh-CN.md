@@ -120,6 +120,8 @@ Checkout 目录的优先级是 `--checkout-dir`，然后是原生 Windows 上的
 
 `profile init` 必须且只能选择一个目标：`-p/--path` 是最终 skills 容器，`-d/--dir` 是 workspace 根目录，对应目标为 `<workspace>/.agents/skills`。目标路径同样以调用目录为基准并支持 `~` 展开，`--root` 和 `--checkout-dir` 仍只用于 discovery。这一版本更改了 `-p` 的原有语义：请将 `hgc p init -p <root> <profile>` 改为 `hgc p init -d <root> <profile>`。
 
+如果发现多个安装名称相同的 skill 目录，交互式终端会要求为本次初始化选择一个来源路径，且不会改写 profile。非交互安装会失败，并提示改在终端中运行或收窄 profile 的 `include` selector；使用 `--dry-run` 时则会列出每个冲突来源并继续预览，不替用户做选择。
+
 ## Skills
 
 | Skill | 适用场景 | 作用 |

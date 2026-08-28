@@ -120,6 +120,8 @@ Normal sync refuses non-fast-forward updates. If an upstream source rewrites his
 
 `profile init` requires exactly one destination: `-p/--path` is the final skills container and `-d/--dir` is a workspace root that expands to `<workspace>/.agents/skills`. Destination paths follow the same invocation-directory and `~` expansion rules, while `--root` and `--checkout-dir` remain discovery-only. This changes the previous `-p` behavior. Migrate `hgc p init -p <root> <profile>` to `hgc p init -d <root> <profile>`.
 
+If multiple discovered skill directories have the same install name, an interactive terminal prompts you to choose the source path for that initialization. The profile is not rewritten. A non-interactive installation fails with guidance to rerun in a terminal or narrow the profile's `include` selector; with `--dry-run`, it lists every conflicting source candidate and continues the preview without choosing one.
+
 ## Skills
 
 | Skill | When | What it does |

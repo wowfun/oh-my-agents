@@ -100,6 +100,8 @@ hgc p init -d <git-bash-workspace> <profile> -r <git-bash-root>
 
 This is a breaking change to `-p`: migrate `hgc p init -p <root> <profile>` to `hgc p init -d <root> <profile>`. The CLI does not append `.agents/skills` to a `--path` value; use `--dir` when the input is a workspace root.
 
+When multiple discovered directories have the same skill name, an interactive terminal asks which source path to install for that invocation without changing the profile. Non-interactive installation fails instead of guessing; rerun it in a terminal or narrow the profile's `include` selector. A non-interactive `--dry-run` lists all conflicting source candidates and continues the preview without choosing one.
+
 ## Command Completion
 
 Use `hgc --install-completion` to install completion for the current shell, or `hgc --show-completion <shell>` to inspect the generated script. Completion includes command aliases and local source, profile, skill, selector, and directory values. It is read-only and silently returns no dynamic candidates when workspace data is missing, invalid, unreadable, or unsynced.
