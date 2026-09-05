@@ -5,8 +5,9 @@ import os
 import shlex
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Annotated, Literal, Sequence
+from typing import Annotated, Literal
 
 import typer
 
@@ -20,6 +21,16 @@ from .completion import (
     complete_skill_reference,
     complete_source,
     complete_source_or_workspace,
+)
+from .file_sync import (
+    FileSyncConfigError,
+    FileSyncError,
+    FileSyncUsageError,
+    SyncDirection,
+    apply_sync_bundle,
+    initialize_sftp_config,
+    pack_sync_bundle,
+    sync_workspace_files,
 )
 from .model_proxy import ModelProxyConfigError
 from .model_proxy.daemon import (
@@ -42,17 +53,19 @@ from .profiles import (
     profile_source_names,
     read_profile_config,
     remove_profile_directory,
-    resolve_selector,
     resolve_profile_skill_reference,
+    resolve_selector,
     skill_source,
     source_relative_selector,
     update_profile_config,
-    validate_profile_skill_selectors,
     validate_profile_name,
+    validate_profile_skill_selectors,
     workspace_source,
     write_profile_config,
 )
 from .sources import (
+    SourceCannotFastForwardError,
+    SourceSyncError,
     add_source_entry,
     build_source_entry,
     find_profile_source_references,
@@ -61,20 +74,160 @@ from .sources import (
     raw_source_by_name,
     remove_source_entry,
     require_source_path,
-    resolve_sources,
     resolve_source_add_args,
+    resolve_sources,
     select_sources,
-    SourceCannotFastForwardError,
-    SourceSyncError,
     sync_source,
 )
 from .space.purge import PurgeRequest, edit_purge_paths, purge_space
 from .space.render import render_paths_edit_report, render_purge_report
 from .workspace import init_workspace, resolve_workspace_root, workspace_config_path
 
-
 DEFAULT_SKILLS_DIRECTORY = Path(".agents") / "skills"
 LinkMode = Literal["symlink", "copy", "junction"]
+SFTPProjectRootOption = Annotated[
+    str | None,
+    typer.Option(
+        "--root",
+        "-r",
+        help="Project/config root, or local root for a temporary endpoint",
+        autocompletion=complete_directory,
+    ),
+]
+SFTPRemoteArgument = Annotated[
+    str | None,
+    typer.Argument(
+        help="Optional temporary [user@]host:path SFTP endpoint",
+        metavar="REMOTE",
+    ),
+]
+SFTPProfileOption = Annotated[
+    str | None,
+    typer.Option(
+        "--profile",
+        "-p",
+        help=(
+            "Named config or SFTP profile; use CONFIG: for the base config "
+            "or CONFIG:PROFILE for a nested profile"
+        ),
+    ),
+]
+SFTPSyncDryRunOption = Annotated[
+    bool,
+    typer.Option("--dry-run", help="Compare both sides without changing any files"),
+]
+SFTPGitChangedOption = Annotated[
+    bool,
+    typer.Option(
+        "--git-changed",
+        help="Only upload paths changed in the local Git working tree",
+    ),
+]
+SFTPPortOption = Annotated[
+    int | None,
+    typer.Option(
+        "--port",
+        "-P",
+        min=1,
+        max=65535,
+        help="SSH port (temporary endpoint only)",
+    ),
+]
+SFTPIdentityOption = Annotated[
+    str | None,
+    typer.Option(
+        "--identity",
+        "-i",
+        help="SSH private key file (temporary endpoint only)",
+    ),
+]
+SFTPExcludeOption = Annotated[
+    list[str] | None,
+    typer.Option(
+        "--exclude",
+        help="Gitignore-style pattern; repeatable (temporary endpoint only)",
+    ),
+]
+SFTPSkipCreateOption = Annotated[
+    bool,
+    typer.Option(
+        "--skip-create",
+        help="Do not copy source-only paths (temporary endpoint only)",
+    ),
+]
+SFTPIgnoreExistingOption = Annotated[
+    bool,
+    typer.Option(
+        "--ignore-existing",
+        help="Do not replace existing paths (temporary endpoint only)",
+    ),
+]
+SFTPDeleteOption = Annotated[
+    bool,
+    typer.Option(
+        "--delete",
+        help="Delete destination-only paths (temporary endpoint only)",
+    ),
+]
+SFTPUpdateOption = Annotated[
+    bool,
+    typer.Option(
+        "--update",
+        help="Do not replace newer destination paths (temporary endpoint only)",
+    ),
+]
+SyncBundlePackRootOption = Annotated[
+    str | None,
+    typer.Option(
+        "--root",
+        "-r",
+        help="Source project root",
+        autocompletion=complete_directory,
+    ),
+]
+SyncBundleApplyRootOption = Annotated[
+    str | None,
+    typer.Option(
+        "--root",
+        "-r",
+        help="Destination root",
+        autocompletion=complete_directory,
+    ),
+]
+SyncBundleExcludeOption = Annotated[
+    list[str] | None,
+    typer.Option(
+        "--exclude",
+        help="Additional Gitignore-style source pattern; repeatable",
+    ),
+]
+SyncBundleDryRunOption = Annotated[
+    bool,
+    typer.Option("--dry-run", help="Build and print the plan without writing files"),
+]
+SyncBundleDeleteOption = Annotated[
+    bool,
+    typer.Option("--delete", help="Apply authorized destination deletions"),
+]
+SyncBundleSkipCreateOption = Annotated[
+    bool,
+    typer.Option("--skip-create", help="Do not create paths missing at destination"),
+]
+SyncBundleIgnoreExistingOption = Annotated[
+    bool,
+    typer.Option("--ignore-existing", help="Do not replace existing paths"),
+]
+SyncBundleUpdateOption = Annotated[
+    bool,
+    typer.Option("--update", help="Do not replace newer destination paths"),
+]
+SyncBundleGitChangedOption = Annotated[
+    bool,
+    typer.Option(
+        "--git-changed",
+        help="Only pack paths changed in the local Git working tree",
+    ),
+]
 
 
 def resolve_skill_install_dir(
@@ -208,6 +361,125 @@ def default_sync_depth(registry: dict) -> int | None:
 
 def init_workspace_command(*, root: str | None, force: bool, dry_run: bool) -> None:
     init_workspace(root, Path.cwd(), force=force, dry_run=dry_run)
+
+
+def sync_files_command(
+    *,
+    direction: SyncDirection,
+    root_value: str | None,
+    profile: str | None,
+    remote_endpoint: str | None,
+    port: int | None,
+    identity: str | None,
+    exclude: list[str] | None,
+    delete: bool,
+    skip_create: bool,
+    ignore_existing: bool,
+    update: bool,
+    git_changed: bool,
+    dry_run: bool,
+) -> None:
+    root = expand_path(root_value, Path.cwd()) if root_value else Path.cwd()
+    try:
+        report = sync_workspace_files(
+            root,
+            direction,
+            profile=profile,
+            git_changed=git_changed,
+            dry_run=dry_run,
+            progress=print,
+            remote_endpoint=remote_endpoint,
+            port=port,
+            identity=expand_path(identity, Path.cwd()) if identity else None,
+            exclude=exclude or (),
+            delete=delete,
+            skip_create=skip_create,
+            ignore_existing=ignore_existing,
+            update=update,
+        )
+    except FileSyncUsageError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    except (FileSyncConfigError, FileSyncError, OSError) as exc:
+        die(str(exc))
+
+    action_count = len(report.actions)
+    if action_count == 0:
+        print("already in sync")
+    elif dry_run:
+        print(f"sync plan: {action_count} action(s)")
+    else:
+        print(f"sync complete: {action_count} action(s)")
+
+
+def init_sftp_config_command(
+    *, root_value: str | None, force: bool, dry_run: bool
+) -> None:
+    root = expand_path(root_value, Path.cwd()) if root_value else Path.cwd()
+    try:
+        initialize_sftp_config(
+            root,
+            force=force,
+            dry_run=dry_run,
+            progress=print,
+        )
+    except (FileSyncConfigError, FileSyncError, OSError) as exc:
+        die(str(exc))
+
+
+def pack_sync_bundle_command(
+    *,
+    root_value: str | None,
+    profile: str | None,
+    no_config: bool,
+    output: str | None,
+    force: bool,
+    git_changed: bool,
+    exclude: list[str] | None,
+    dry_run: bool,
+) -> None:
+    root = expand_path(root_value, Path.cwd()) if root_value else Path.cwd()
+    output_path = expand_path(output, Path.cwd()) if output else None
+    try:
+        pack_sync_bundle(
+            root,
+            profile=profile,
+            no_config=no_config,
+            output_path=output_path,
+            force=force,
+            git_changed=git_changed,
+            exclude=exclude or (),
+            dry_run=dry_run,
+            progress=print,
+        )
+    except (FileSyncConfigError, FileSyncError, OSError) as exc:
+        die(str(exc))
+
+
+def apply_sync_bundle_command(
+    *,
+    bundle_value: str,
+    root_value: str | None,
+    delete: bool,
+    skip_create: bool,
+    ignore_existing: bool,
+    update: bool,
+    dry_run: bool,
+) -> None:
+    bundle_path = expand_path(bundle_value, Path.cwd())
+    root = expand_path(root_value, Path.cwd()) if root_value else Path.cwd()
+    try:
+        apply_sync_bundle(
+            bundle_path,
+            root,
+            delete=delete,
+            skip_create=skip_create,
+            ignore_existing=ignore_existing,
+            update=update,
+            dry_run=dry_run,
+            progress=print,
+        )
+    except (FileSyncConfigError, FileSyncError, OSError) as exc:
+        die(str(exc))
 
 
 def model_proxy_config_path(
@@ -926,7 +1198,10 @@ def make_app(*, help_text: str, add_completion: bool) -> typer.Typer:
 
 
 app = make_app(
-    help_text="Manage Hagency workspaces, profiles, sources, local services, and disk space.",
+    help_text=(
+        "Manage Hagency workspaces, profiles, sources, file sync, local services, "
+        "and disk space."
+    ),
     add_completion=True,
 )
 source_app = make_app(help_text="Manage workspace sources.", add_completion=False)
@@ -934,9 +1209,14 @@ skill_app = make_app(
     help_text="Manage workspace and source skills.", add_completion=False
 )
 profile_app = make_app(help_text="Manage profiles.", add_completion=False)
+sync_app = make_app(
+    help_text="Sync project files over SFTP or portable offline bundles.",
+    add_completion=False,
+)
 serve_app = make_app(help_text="Manage local Hagency services.", add_completion=False)
 space_app = make_app(help_text="Inspect and reclaim disk space.", add_completion=False)
 
+app.add_typer(sync_app, name="sync")
 app.add_typer(source_app, name="source")
 app.add_typer(source_app, name="s", help="Alias for source.")
 app.add_typer(skill_app, name="skill")
@@ -966,6 +1246,181 @@ def init_cli(
     ] = False,
 ) -> None:
     init_workspace_command(root=root, force=force, dry_run=dry_run)
+
+
+@sync_app.command("l2r", help="Alias for local-to-remote.")
+@sync_app.command(
+    "local-to-remote", help="Sync local project files to the remote (alias: l2r)."
+)
+def local_to_remote_sync_cli(
+    remote_endpoint: SFTPRemoteArgument = None,
+    root: SFTPProjectRootOption = None,
+    profile: SFTPProfileOption = None,
+    port: SFTPPortOption = None,
+    identity: SFTPIdentityOption = None,
+    exclude: SFTPExcludeOption = None,
+    delete: SFTPDeleteOption = False,
+    skip_create: SFTPSkipCreateOption = False,
+    ignore_existing: SFTPIgnoreExistingOption = False,
+    update: SFTPUpdateOption = False,
+    git_changed: SFTPGitChangedOption = False,
+    dry_run: SFTPSyncDryRunOption = False,
+) -> None:
+    sync_files_command(
+        direction=SyncDirection.LOCAL_TO_REMOTE,
+        remote_endpoint=remote_endpoint,
+        root_value=root,
+        profile=profile,
+        port=port,
+        identity=identity,
+        exclude=exclude,
+        delete=delete,
+        skip_create=skip_create,
+        ignore_existing=ignore_existing,
+        update=update,
+        git_changed=git_changed,
+        dry_run=dry_run,
+    )
+
+
+@sync_app.command("r2l", help="Alias for remote-to-local.")
+@sync_app.command(
+    "remote-to-local", help="Sync remote project files to local (alias: r2l)."
+)
+def remote_to_local_sync_cli(
+    remote_endpoint: SFTPRemoteArgument = None,
+    root: SFTPProjectRootOption = None,
+    profile: SFTPProfileOption = None,
+    port: SFTPPortOption = None,
+    identity: SFTPIdentityOption = None,
+    exclude: SFTPExcludeOption = None,
+    delete: SFTPDeleteOption = False,
+    skip_create: SFTPSkipCreateOption = False,
+    ignore_existing: SFTPIgnoreExistingOption = False,
+    update: SFTPUpdateOption = False,
+    dry_run: SFTPSyncDryRunOption = False,
+) -> None:
+    sync_files_command(
+        direction=SyncDirection.REMOTE_TO_LOCAL,
+        remote_endpoint=remote_endpoint,
+        root_value=root,
+        profile=profile,
+        port=port,
+        identity=identity,
+        exclude=exclude,
+        delete=delete,
+        skip_create=skip_create,
+        ignore_existing=ignore_existing,
+        update=update,
+        git_changed=False,
+        dry_run=dry_run,
+    )
+
+
+@sync_app.command("both", help="Synchronize local and remote project files.")
+def bidirectional_sync_cli(
+    remote_endpoint: SFTPRemoteArgument = None,
+    root: SFTPProjectRootOption = None,
+    profile: SFTPProfileOption = None,
+    port: SFTPPortOption = None,
+    identity: SFTPIdentityOption = None,
+    exclude: SFTPExcludeOption = None,
+    skip_create: SFTPSkipCreateOption = False,
+    ignore_existing: SFTPIgnoreExistingOption = False,
+    dry_run: SFTPSyncDryRunOption = False,
+) -> None:
+    sync_files_command(
+        direction=SyncDirection.BOTH,
+        remote_endpoint=remote_endpoint,
+        root_value=root,
+        profile=profile,
+        port=port,
+        identity=identity,
+        exclude=exclude,
+        delete=False,
+        skip_create=skip_create,
+        ignore_existing=ignore_existing,
+        update=False,
+        git_changed=False,
+        dry_run=dry_run,
+    )
+
+
+@sync_app.command("init", help="Initialize .vscode/sftp.json in a project directory.")
+def init_sftp_config_cli(
+    root: SFTPProjectRootOption = None,
+    force: Annotated[
+        bool, typer.Option("--force", help="Overwrite an existing SFTP config")
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Print the config without changing files"),
+    ] = False,
+) -> None:
+    init_sftp_config_command(root_value=root, force=force, dry_run=dry_run)
+
+
+@sync_app.command("pack", help="Create a portable offline sync ZIP from local files.")
+def pack_sync_bundle_cli(
+    root: SyncBundlePackRootOption = None,
+    profile: SFTPProfileOption = None,
+    no_config: Annotated[
+        bool,
+        typer.Option(
+            "--no-config",
+            help="Do not discover or read .vscode/sftp.json",
+        ),
+    ] = False,
+    output: Annotated[
+        str | None,
+        typer.Option(
+            "--output",
+            "-o",
+            help="Output ZIP path (default: ./hgc-sync.zip)",
+        ),
+    ] = None,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Overwrite an existing output ZIP"),
+    ] = False,
+    git_changed: SyncBundleGitChangedOption = False,
+    exclude: SyncBundleExcludeOption = None,
+    dry_run: SyncBundleDryRunOption = False,
+) -> None:
+    pack_sync_bundle_command(
+        root_value=root,
+        profile=profile,
+        no_config=no_config,
+        output=output,
+        force=force,
+        git_changed=git_changed,
+        exclude=exclude,
+        dry_run=dry_run,
+    )
+
+
+@sync_app.command("apply", help="Verify and apply a portable offline sync ZIP.")
+def apply_sync_bundle_cli(
+    bundle: Annotated[
+        str,
+        typer.Argument(help="Path to a sync ZIP created by hgc sync pack"),
+    ],
+    root: SyncBundleApplyRootOption = None,
+    delete: SyncBundleDeleteOption = False,
+    skip_create: SyncBundleSkipCreateOption = False,
+    ignore_existing: SyncBundleIgnoreExistingOption = False,
+    update: SyncBundleUpdateOption = False,
+    dry_run: SyncBundleDryRunOption = False,
+) -> None:
+    apply_sync_bundle_command(
+        bundle_value=bundle,
+        root_value=root,
+        delete=delete,
+        skip_create=skip_create,
+        ignore_existing=ignore_existing,
+        update=update,
+        dry_run=dry_run,
+    )
 
 
 @space_app.command("purge", help="Find and remove rebuildable project artifacts.")

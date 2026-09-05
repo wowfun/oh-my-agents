@@ -6,7 +6,7 @@
 
 ## Hagency CLI
 
-`hgc` CLI 用于管理 Hagency workspace、source、skill discovery 和安装、profile、生成的 profile skill 输出，以及项目构建产物清理。Source registry 位于 [`hagency-config.toml`](hagency-config.toml)，profile config 位于 `profiles/<name>/config.toml`。
+`hgc` CLI 用于管理 Hagency workspace、source、skill discovery 和安装、profile、在线与离线项目文件同步、生成的 profile skill 输出，以及项目构建产物清理。Source registry 位于 [`hagency-config.toml`](hagency-config.toml)，profile config 位于 `profiles/<name>/config.toml`。
 
 ```sh
 uv tool install -e tools/hagency-cli
@@ -19,9 +19,16 @@ hgc skill add <source>:<selector> -d <workspace>
 hgc skill add <source>:<selector> --global
 hgc p init -p <xxx>/skills <profile>
 hgc p init -d <workspace> <profile>
+hgc sync both --dry-run
 hgc space purge --dry-run
 hgc serve start --model-proxy
 ```
+
+使用 editable 安装后，`hgc` 在 workspace 外运行时可以定位到提供
+`hagency_cli` 源码的 Hagency Kit checkout，因此通常不再需要 `-r`。Workspace
+优先级依次为显式 `--root`、当前目录及其父目录、安装源码所在 checkout。
+Fallback 只检查该源码 checkout 根目录中的配置，不会沿已安装包的祖先目录
+继续查找。非 editable 安装在 workspace 外运行时需要指定 `--root`。
 
 可为当前 shell 安装补全，或输出指定 shell 的补全脚本：
 
@@ -30,7 +37,86 @@ hgc --install-completion
 hgc --show-completion bash
 ```
 
-补全覆盖命令、别名、选项、目录，以及本地可用的 source、profile、skill 和 selector 值。它会尊重当前目录、`--root` 和 `--checkout-dir`；workspace 缺失、配置损坏、目录不可读或 source 未同步时会静默省略动态候选。
+补全覆盖命令、别名、选项、目录，以及本地可用的 source、profile、skill 和 selector 值。它与命令使用相同的 workspace 优先级，并尊重 `--checkout-dir`；workspace 缺失、配置损坏、目录不可读或 source 未同步时会静默省略动态候选。
+
+### SFTP 文件同步
+
+先在已存在的项目目录中初始化参考 VSCode-SFTP 模板，再编辑其中的连接占位值。初始化不会连接服务器，也不会写入密码或私钥。已有配置默认拒绝覆盖，只有传入 `--force` 才会替换；`--dry-run` 只打印目标路径和模板，不创建文件：
+
+```sh
+hgc sync init --root /path/to/project
+hgc sync init --root /path/to/project --dry-run
+hgc sync init --root /path/to/project --force
+```
+
+在包含 `.vscode/sftp.json` 的项目目录中运行同步。命令沿用 VSCode-SFTP 的 `context` 到 `remotePath` 映射：
+
+```sh
+hgc sync local-to-remote --dry-run
+hgc sync local-to-remote
+hgc sync local-to-remote --git-changed --dry-run
+hgc sync remote-to-local
+hgc sync both
+```
+
+`l2r` 是 `local-to-remote` 的简称，`r2l` 是 `remote-to-local` 的简称；简称与完整命令接受相同选项。
+
+一次性目录树同步可直接传入 SCP 风格 endpoint。此模式默认以当前目录为本地根目录，也可通过 `--root` 指定；即使 `.vscode/sftp.json` 存在或已经损坏，也会完全绕过它：
+
+```sh
+hgc sync l2r dev@server:/srv/project --dry-run
+hgc sync r2l server:~/Projects/ws --root ./restore
+hgc sync both server:C:/Projects/ws --exclude '*.tmp'
+hgc sync l2r '[2001:db8::1]:/srv/project' -P 2222 -i ~/.ssh/id_ed25519
+```
+
+endpoint 必须包含非空远端路径；远端主目录使用 `host:.`，并支持 `host:~/path`、SSH alias、显式 `user@host`、方括号包裹的 IPv6 和 Windows 盘符路径。三个临时同步方向都接受 `-P/--port`、`-i/--identity`、可重复的 `--exclude`、`--skip-create` 和 `--ignore-existing`。两个单向命令还接受 `--delete` 和 `--update`，`l2r` 额外接受 `--git-changed`；`both` 不开放 `--delete` 或 `--update`。这些临时专用选项必须与 endpoint 一起使用，endpoint 与 `--profile` 互斥。
+
+临时同步采用默认不删除的安全配置，并始终排除 `.git/` 和 `.vscode/sftp.json`；用户后续提供否定规则也不能重新纳入它们。CLI 不提供明文密码参数。认证使用 SSH agent、默认密钥、SSH config 或 `--identity`；加密私钥应先载入 agent。endpoint 中的用户、`-P`、`-i` 优先于 SSH config；默认 `~/.ssh/config` 中的 `HostName`、`User`、`Port`、`IdentityFile` 和 `ProxyCommand` 仍会生效。最后回退到端口 22 和当前系统用户，已有的 host-key 校验继续生效。
+
+`local-to-remote` 和 `remote-to-local` 将命令中指定的一侧视为来源，并让它在共有路径冲突时胜出。默认会复制目标侧缺失的文件，并用整秒级修改时间和大小找出可能需要覆盖的文件；只存在于目标侧的路径会保留。覆盖共有普通文件前，如果大小已能证明 CRLF 归一化后也不可能相等，命令会跳过内容比较；否则读取两侧内容，字节完全相同，或文本仅有 CRLF 与 LF 换行差异时，会跳过该动作。包含 NUL 字节的文件按二进制原始内容比较，单独的 CR 仍视为有效差异，实际传输永远不会改写来源字节。dry-run 同样会进行这一步额外的内容读取。`syncOption.update`、`ignoreExisting`、`skipCreate` 和 `delete` 保持 VSCode-SFTP 语义；`delete = true` 会删除只存在于目标侧的路径，因此应先检查 dry-run 计划。`both` 会把单侧文件复制到另一侧，并让共有文件中精确修改时间较新的版本胜出；时间完全相同时本地侧胜出。与 VSCode-SFTP 一致，此模式只使用 `skipCreate` 和 `ignoreExisting`。
+
+使用 `hgc sync local-to-remote --git-changed` 可将上传范围限制为配置中本地 `context`（临时模式则是本地根目录）下 Git 报告的 staged、unstaged、untracked、deleted 和 renamed 路径；Git ignored 路径不纳入。重命名会上传新路径；与其他删除一样，移除旧远端路径在配置模式下要求 `syncOption.delete = true`，在临时模式下要求 `--delete`。Git 路径集合只会缩小正常同步计划，ignore 和 sync 选项仍拥有最终决定权。扫描只保留变更路径及其父目录，在规划前跳过无关子目录；仍需枚举所访问目录中的条目。如果没有 Git 变化，命令不会建立 SFTP 连接。普通同步完全不会探测 Git，因此未安装 Git、项目为普通目录都不受影响；只有显式传入 `--git-changed` 时，Git 缺失、`context` 不在仓库中或 Git 检查失败才会在连接远端前明确报错。每条 Git 检查命令的超时为 120 秒。
+
+在线同步使用单个 SFTP 连接，按顺序执行传输。当前支持 SFTP 配置、`context`、Windows 风格远端路径、`ignore`、`ignoreFile`、`remoteTimeOffsetInHours`、`filePerm`、`dirPerm`、`useTempFile`/`openSsh`，以及密码、私钥、SSH agent 和 `~/.ssh/config` 认证。配置权限只在创建或上传远端文件、目录时应用，不会校准既有远端目录的权限。`.vscode/sftp.json` 本身始终排除，避免同步上传其中的凭证或被远端版本覆盖。SSH host key 必须已存在于用户的 known-hosts 文件中。单个配置会被自动选择；配置数组或嵌套 `profiles` 可用 `--profile NAME` 选择，有歧义的短名称会被拒绝，`--profile CONFIG:PROFILE` 明确选择嵌套 profile，`--profile CONFIG:` 则选择不应用 `defaultProfile` 的基础配置；其他情况下 `defaultProfile` 会自动生效。需要指定其他项目目录时使用 `--root <directory>`。除了没有变化的 `--git-changed` 上传外，`--dry-run` 仍会连接并扫描远端，但不会修改任何文件。
+
+### 离线同步包
+
+无法使用 SSH、SFTP 或网络时，可使用 `pack` / `apply`。`pack` 只读取本地文件并生成跨平台 ZIP；用户通过任意外部渠道传递 ZIP 后，再在目标端本地校验并应用：
+
+```sh
+hgc sync pack --root /path/to/source
+hgc sync pack -r /path/to/source -o release.zip --force
+hgc sync pack -r /path/to/source --git-changed --exclude '*.tmp'
+hgc sync apply release.zip --root /path/to/destination --dry-run
+hgc sync apply release.zip -r /path/to/destination --delete
+```
+
+默认输出为调用目录下的 `hgc-sync.zip`。已有输出默认拒绝覆盖，只有显式传入 `--force` 才会通过同目录临时文件和原子替换写入。`--dry-run` 会读取并计算所选来源文件的摘要，但不会创建包。来源默认为当前目录。存在 `.vscode/sftp.json` 时，`pack` 只复用 profile 选择、`context`、`ignore` 和 `ignoreFile`；它既不会验证或记录连接、认证字段，也绝不会建立 SFTP 连接。缺少配置时按普通目录处理。JSON 损坏或 profile 选择有歧义会报错；`--no-config` 可完全绕过配置探测，并与 `--profile` 互斥。
+
+普通 pack 生成完整来源快照；`--git-changed` 则生成 Git patch，包含 staged、unstaged、untracked、deleted 和 renamed 路径，重命名前的旧路径会成为删除标记。Git clean 或过滤后没有有效变化时不会创建包。完整 pack 和普通目录不需要安装 Git。`.git/`、`.vscode/sftp.json`、输出包自身、配置 ignore 规则和可重复的 `--exclude` 始终排除。符号链接不会跟随或打包；它们会记录到清单并打印醒目警告，但 pack 仍成功结束。
+
+Git patch 的打包和应用会在扫描时跳过无关子目录。ZIP 根目录包含版本化 `manifest.json`，文件原始字节位于 `payload/`。清单解压后的大小上限为 16 MiB，超限时会在解压或写入目标前拒绝；打包及其 dry-run 遵守相同限制。清单记录可移植相对路径、类型、大小、纳秒 mtime、POSIX mode、SHA-256、有效 ignore 规则、删除标记和跳过的符号链接，但不含 host、凭证或来源绝对路径。SHA-256 只用于检测损坏；同步包不提供签名、来源认证或加密。
+
+`apply` 会在任何目标写入前完整验证归档、清单版本、条目集合、安全路径、重复项、跨平台路径冲突、大小和摘要。目标目录可以不存在，只会在真实 apply 时创建。默认由包内容赢得共有路径冲突；`--skip-create`、`--ignore-existing` 和 `--update` 沿用单向同步语义。对于 full 包，`--delete` 删除目标独有且未忽略的路径；对于 Git patch，它只应用清单中的明确删除标记，绝不会扩张成目标目录镜像。文件写入采用原子替换，删除最后执行。文本仅有 CRLF/LF 差异时保持目标字节不变，含 NUL 文件按原始字节比较，传输内容永不改写。POSIX 上新文件恢复来源 mode、覆盖文件保留目标 mode；Windows 不强制 POSIX 权限；支持的平台会恢复 mtime。
+
+### 通过 SFTP 同步远端 WSL
+
+如果 Windows OpenSSH alias 只是通过 `RemoteCommand` 启动 WSL，它仍然是 Windows SFTP endpoint：OpenSSH 将 SFTP 配置为独立 subsystem，`hgc` 不会解析 `RemoteCommand` 或 `RequestTTY`。要远程同步 WSL 文件系统，需要在目标 WSL 发行版内运行标准 sshd，并通过可直达地址或 Windows 端口转发/防火墙暴露，再为它设置独立 alias（[Microsoft OpenSSH Server configuration](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh-server-configuration)）：
+
+```sshconfig
+Host win-wsl
+  HostName desktop-7divr3r
+  User <wsl-linux-user>
+  Port 2222
+```
+
+```sh
+hgc sync l2r win-wsl:/home/<wsl-linux-user>/Projects/ws --dry-run
+hgc sync r2l win-wsl:~/Projects/ws -r ./restore
+```
+
+不要让这个 alias 继承 `RemoteCommand` 或 `RequestTTY`。`hgc` 不负责安装 WSL sshd、配置 Windows 网络或编辑 SSH config。在原生 Windows 上，`\\wsl.localhost\DISTRO\home\...` 可作为本地 `--root`，但这不是上述远端 WSL 传输方案，而且跨 Windows/WSL 文件系统访问可能有性能成本（[Microsoft WSL filesystem guidance](https://learn.microsoft.com/en-us/windows/wsl/filesystems)）。
 
 ### 项目构建产物清理
 
@@ -128,7 +214,7 @@ Checkout 目录的优先级是 `--checkout-dir`，然后是原生 Windows 上的
 | --- | --- | --- |
 | [`analyze-diff`](skills/analyze-diff/SKILL.md) | 解释 git diff、提交范围、分支对比或粘贴的变更集 | 把原始变更证据整理成面向发布的摘要、功能变更列表、风险说明、测试缺口和发布说明草稿。 |
 | [`diagnose-ai-workflow`](skills/diagnose-ai-workflow/SKILL.md) | 审计 prompt、Agent 工作流、工具链、多 Agent 系统或生产就绪度 | 基于现有证据，从 prompt、上下文、工具、架构、安全、可靠性和系统性能等维度评估工作流健康度。 |
-| [`hagency-cli`](skills/hagency-cli/SKILL.md) | 使用 Hagency Kit CLI 管理 source、profile、skill、项目构建产物清理、profile 初始化或本地模型代理 | 帮助 Agent 管理 Hagency workspace 内容，安全预览项目构建产物清理，并运行 provider 级 Responses/Chat 代理接口。 |
+| [`hagency-cli`](skills/hagency-cli/SKILL.md) | 使用 Hagency Kit CLI 管理 source、profile、skill、在线或离线项目文件同步、项目构建产物清理、profile 初始化或本地模型代理 | 帮助 Agent 管理 Hagency workspace 内容、同步项目文件、安全预览项目构建产物清理，并运行 provider 级 Responses/Chat 代理接口。 |
 | [`log-analyzer`](skills/log-analyzer/SKILL.md) | 调查应用、服务器、JSON、CI 或轮转 gzip 日志 | 通过采样和分析日志解释故障、错误峰值、慢请求、流量模式和事故信号，同时控制证据范围并做脱敏处理。 |
 
 ## Profiles

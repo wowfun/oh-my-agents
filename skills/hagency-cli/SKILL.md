@@ -1,11 +1,11 @@
 ---
 name: hagency-cli
-description: Use the Hagency Kit CLI for workspace, source, skill, profile, project artifact purge, and local model-proxy workflows. Trigger for `hgc`, source syncs, skill discovery or installation, profile skill edits, profile initialization, project artifact cleanup, `hagency-config.toml`, `hagency-model-proxy.toml`, provider-level OpenAI Responses or Chat Completions proxying, generated profile skill outputs, and updates to `skills/hagency-cli/SKILL.md`.
+description: Use the Hagency Kit CLI for workspace, source, skill, profile, online or offline project file sync, project artifact purge, and local model-proxy workflows. Trigger for `hgc`, source syncs, `.vscode/sftp.json` file sync, offline sync bundles, skill discovery or installation, profile skill edits, profile initialization, project artifact cleanup, `hagency-config.toml`, `hagency-model-proxy.toml`, provider-level OpenAI Responses or Chat Completions proxying, generated profile skill outputs, and updates to `skills/hagency-cli/SKILL.md`.
 ---
 
 # Hagency CLI
 
-Use the repo-local `hgc` CLI to inspect and manage Hagency workspaces, sources, skills, profiles, generated profile skill links, rebuildable project artifacts, and the loopback model proxy. If the CLI cannot satisfy the user's request, explain the gap and ask whether to improve `hagency-cli`.
+Use the repo-local `hgc` CLI to inspect and manage Hagency workspaces, sources, skills, profiles, online or offline project file sync, generated profile skill links, rebuildable project artifacts, and the loopback model proxy. If the CLI cannot satisfy the user's request, explain the gap and ask whether to improve `hagency-cli`.
 
 ## Workspace Context
 
@@ -57,6 +57,61 @@ hgc s sync --profile <profile> -s 4: --reanchor -r <root>
 ```
 
 Reanchoring requires no staged, unstaged, or untracked changes. It does not save sync state or create recovery refs. `--dry-run --reanchor` only describes what an actual sync may do after fetching.
+
+## Sync Project Files over SFTP
+
+If an existing project has no SFTP config, initialize the reference placeholder template with `hgc sync init --root <project>`, then edit it before syncing. Initialization requires an existing project directory, never connects to the server, refuses an existing config unless `--force` is explicit, and supports a non-writing `--dry-run`.
+
+Run sync from the directory that contains `.vscode/sftp.json`, or pass that directory with `--root`. Preview any mutating sync first. A sync dry run connects and reads the remote tree but performs no writes or deletes.
+
+```sh
+hgc sync init --root <project>
+hgc sync local-to-remote --dry-run
+hgc sync local-to-remote
+hgc sync local-to-remote --git-changed --dry-run
+hgc sync remote-to-local
+hgc sync both
+```
+
+Use `l2r` as the short form of `local-to-remote` and `r2l` as the short form of `remote-to-local`; the short forms accept the same options as the full commands.
+
+For temporary directory-tree sync, pass an SCP-style endpoint. This completely bypasses `.vscode/sftp.json`, including an invalid file, and uses the current directory or `--root` as the local root:
+
+```sh
+hgc sync l2r [user@]host:/remote/path --dry-run
+hgc sync r2l host:~/remote/path -r ./restore
+hgc sync both host:C:/Windows/path --exclude '*.tmp'
+```
+
+Require a non-empty endpoint path; use `host:.` for the remote home directory. SSH aliases, `user@host`, bracketed IPv6, `~/path`, and Windows drive paths are valid. Every temporary direction supports `-P/--port`, `-i/--identity`, repeatable `--exclude`, `--skip-create`, and `--ignore-existing`. One-way commands additionally support `--delete` and `--update`; `l2r` also supports `--git-changed`. Do not use `--delete` or `--update` with `both`. Temporary-only options without an endpoint are errors, as is combining an endpoint with `--profile`.
+
+Temporary mode defaults to no deletion and always excludes `.git/` and `.vscode/sftp.json`; user negations cannot re-include them. There is no plaintext password option. Prefer an SSH agent, SSH config, default keys, or `--identity`, and pre-load encrypted keys into the agent. Endpoint user, `-P`, and `-i` override SSH config; otherwise use `HostName`, `User`, `Port`, `IdentityFile`, and `ProxyCommand` from `~/.ssh/config`, followed by port 22 and the current system user. Host keys must already be trusted.
+
+One-way sync treats the named side as the source and honors `syncOption.delete`, `skipCreate`, `ignoreExisting`, and `update`; destination-only paths remain unless `delete` is true. Bidirectional sync makes the precisely newest shared file win, gives local the exact-timestamp tie, and uses only `skipCreate` and `ignoreExisting`. Before overwriting a shared regular file, all directions read both copies and skip byte-identical text or text that differs only by CRLF versus LF; NUL-containing files use raw binary comparison, lone CR remains significant, and transfer never rewrites line endings. This comparison also runs during dry-run.
+
+`local-to-remote --git-changed` restricts the normal plan to staged, unstaged, untracked, deleted, and renamed paths in the configured local `context`, or in the temporary local root. Ignored paths stay excluded and old rename paths are deleted only when `syncOption.delete` is true in config mode or `--delete` is present in temporary mode. A clean Git worktree returns without connecting. Ordinary sync never invokes Git and remains usable without Git or outside a repository. If `--git-changed` is explicit, treat missing Git, a non-repository context, or Git inspection failure as a safe error before connecting; never silently widen it to a full upload.
+
+The command also honors `context`, `remotePath`, `ignore`, `ignoreFile`, time offsets, configured permissions on newly created or uploaded remote paths, temp-file uploads, private keys, passwords, SSH agents, and SSH config. It always excludes `.vscode/sftp.json` itself. Host keys must already be trusted. Use `--profile NAME` for config arrays or nested profiles. Ambiguous short names fail safely; use `--profile CONFIG:PROFILE` for a nested profile or `--profile CONFIG:` for the base config without its `defaultProfile`.
+
+For a remote WSL filesystem, require a standard SSH/SFTP endpoint served by sshd inside WSL. A Windows OpenSSH alias using `RemoteCommand wsl ...` remains a Windows SFTP endpoint because this workflow ignores `RemoteCommand` and `RequestTTY`. Recommend a separate alias such as `win-wsl` pointing to the WSL sshd port, without those shell-only options. Do not install WSL sshd, configure port forwarding/firewall rules, or edit the user's SSH config automatically. A native-Windows `\\wsl.localhost\DISTRO\...` path may be used as a local `--root`, but it is not a remote WSL transport and may be slower across the filesystem boundary.
+
+## Create and Apply Offline Sync Bundles
+
+Use an offline bundle when the two sides cannot use SSH/SFTP. `pack` reads local files only and never opens a remote connection. Transfer the ZIP through a user-chosen channel, then run `apply` locally on the destination. Treat this as a one-way source-to-destination operation; reverse direction requires a new pack on the other side.
+
+```sh
+hgc sync pack -r <source>
+hgc sync pack -r <source> -o <bundle.zip> --force
+hgc sync pack -r <source> --git-changed --exclude '<pattern>'
+hgc sync apply <bundle.zip> -r <destination> --dry-run
+hgc sync apply <bundle.zip> -r <destination> --delete
+```
+
+The default output is `hgc-sync.zip` in the invocation directory. Existing output requires `--force`; `--dry-run` hashes the planned files without writing a ZIP. When a project config exists, reuse only profile selection, `context`, `ignore`, and `ignoreFile`; do not validate, record, or use host and authentication settings. Missing config means ordinary-directory mode. Use `--no-config` to bypass even malformed config, but never combine it with `--profile`.
+
+By default, pack a full snapshot. Use `--git-changed` for a Git patch containing staged, unstaged, untracked, deleted, and renamed paths; old rename paths become deletion markers. A clean or fully filtered Git selection creates no bundle. Always exclude `.git/`, `.vscode/sftp.json`, and an output bundle inside the source tree, regardless of negation rules. Apply config ignore rules and repeatable `--exclude` patterns with Gitignore semantics. Never follow or pack symlinks; report each skipped path as a warning and preserve the list in the manifest.
+
+An offline ZIP has `manifest.json` at its root and file bytes under `payload/`. Before any destination mutation, validate the whole archive, its exact entry set, version, paths, portable path collisions, sizes, and SHA-256 hashes. Do not imply that checksums authenticate, sign, or encrypt a bundle. Apply uses atomic file replacement and performs deletions last. `--skip-create`, `--ignore-existing`, and `--update` keep the one-way sync meanings. For full bundles, `--delete` mirrors non-ignored destination paths; for Git patches, it applies only manifest deletion markers. CRLF and LF are equivalent for NUL-free text comparisons, binary files use raw bytes, and content is never rewritten. On POSIX, new files receive source mode while replacements preserve destination mode; restore mtime when supported.
 
 ## Install One Skill
 

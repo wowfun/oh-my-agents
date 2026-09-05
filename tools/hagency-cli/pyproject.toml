@@ -1,11 +1,13 @@
 [project]
 name = "hagency-cli"
 version = "0.1.0"
-description = "CLI helpers for Hagency workspaces, skills, profiles, project cleanup, and local model proxying."
+description = "CLI helpers for Hagency workspaces, skills, profiles, online and offline file sync, project cleanup, and local model proxying."
 requires-python = ">=3.11"
 dependencies = [
     "aiohttp>=3.12,<4",
     "multidict>=6,<7",
+    "paramiko>=3.5,<5",
+    "pathspec>=0.12,<1",
     "python-dotenv>=1.1,<2",
     "questionary>=2.1,<3",
     "typer>=0.27.1,<0.28",

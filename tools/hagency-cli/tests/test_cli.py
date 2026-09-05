@@ -8,13 +8,14 @@ import sys
 import tempfile
 import textwrap
 import unittest
-from unittest import mock
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 import tomllib
+
 from typer.testing import CliRunner
 
 from hagency_cli import cli
@@ -22,6 +23,7 @@ from hagency_cli import common as common_module
 from hagency_cli import profile_ui as profile_ui_module
 from hagency_cli import profiles as profile_module
 from hagency_cli import sources as source_module
+from hagency_cli import workspace as workspace_module
 from hagency_cli.space import purge as purge_module
 from hagency_cli.space import questionary_ui as questionary_ui_module
 from hagency_cli.space import render as space_render_module
@@ -280,6 +282,11 @@ class CliTests(unittest.TestCase):
     def test_short_help_option_is_available_at_every_command_level(self) -> None:
         for args in (
             ("-h",),
+            ("sync", "-h"),
+            ("sync", "init", "-h"),
+            ("sync", "pack", "-h"),
+            ("sync", "apply", "-h"),
+            ("sync", "both", "-h"),
             ("serve", "-h"),
             ("serve", "start", "-h"),
             ("space", "-h"),
@@ -371,8 +378,96 @@ class CliTests(unittest.TestCase):
         self.assertEqual(stderr, "")
         self.assertEqual(
             values,
-            ["init", "source", "s", "skill", "profile", "p", "serve", "space"],
+            [
+                "init",
+                "sync",
+                "source",
+                "s",
+                "skill",
+                "profile",
+                "p",
+                "serve",
+                "space",
+            ],
         )
+
+        values, _stderr = self.complete_bash("hgc sync ", 2)
+        self.assertEqual(
+            values,
+            [
+                "local-to-remote",
+                "l2r",
+                "remote-to-local",
+                "r2l",
+                "both",
+                "init",
+                "pack",
+                "apply",
+            ],
+        )
+
+        values, _stderr = self.complete_bash("hgc sync both --", 3)
+        self.assertIn("--profile", values)
+        self.assertIn("--dry-run", values)
+        self.assertIn("--port", values)
+        self.assertIn("--identity", values)
+        self.assertIn("--exclude", values)
+        self.assertIn("--skip-create", values)
+        self.assertIn("--ignore-existing", values)
+        self.assertNotIn("--force", values)
+        self.assertNotIn("--git-changed", values)
+        self.assertNotIn("--delete", values)
+        self.assertNotIn("--update", values)
+
+        values, _stderr = self.complete_bash("hgc sync local-to-remote --", 3)
+        self.assertIn("--git-changed", values)
+        self.assertIn("--delete", values)
+        self.assertIn("--update", values)
+
+        values, _stderr = self.complete_bash("hgc sync l2r --", 3)
+        self.assertIn("--git-changed", values)
+
+        values, _stderr = self.complete_bash("hgc sync r2l --", 3)
+        self.assertNotIn("--git-changed", values)
+        self.assertIn("--delete", values)
+        self.assertIn("--update", values)
+
+        values, _stderr = self.complete_bash("hgc sync init --", 3)
+        self.assertIn("--root", values)
+        self.assertIn("--force", values)
+        self.assertIn("--dry-run", values)
+        self.assertNotIn("--profile", values)
+
+        values, _stderr = self.complete_bash("hgc sync pack --", 3)
+        for option in (
+            "--root",
+            "--profile",
+            "--no-config",
+            "--output",
+            "--force",
+            "--git-changed",
+            "--exclude",
+            "--dry-run",
+        ):
+            self.assertIn(option, values)
+        self.assertNotIn("--delete", values)
+        self.assertNotIn("--port", values)
+        self.assertNotIn("--identity", values)
+
+        values, _stderr = self.complete_bash("hgc sync apply --", 3)
+        for option in (
+            "--root",
+            "--delete",
+            "--skip-create",
+            "--ignore-existing",
+            "--update",
+            "--dry-run",
+        ):
+            self.assertIn(option, values)
+        self.assertNotIn("--profile", values)
+        self.assertNotIn("--exclude", values)
+        self.assertNotIn("--git-changed", values)
+        self.assertNotIn("--force", values)
 
         values, _stderr = self.complete_bash("hgc serve ", 2)
         self.assertEqual(values, ["start", "stop", "restart"])
@@ -801,6 +896,110 @@ class CliTests(unittest.TestCase):
         )
         self.assertIn("other-source\tlocal", stdout)
         self.assertNotIn("local-source\tlocal", stdout)
+
+    def test_workspace_resolution_precedence_includes_installed_source(self) -> None:
+        current = self.root / "current"
+        nested = current / "nested"
+        nested.mkdir(parents=True)
+        (current / "hagency-config.toml").write_text("invalid = [\n", encoding="utf-8")
+        explicit = self.root / "explicit"
+        explicit.mkdir()
+        (explicit / "hagency-config.toml").write_text("", encoding="utf-8")
+        installed_module = (
+            self.root / "tools" / "hagency-cli" / "src" / "hagency_cli" / "workspace.py"
+        )
+
+        with mock.patch.object(workspace_module, "__file__", str(installed_module)):
+            self.assertEqual(
+                workspace_module.resolve_workspace_root(str(explicit), nested),
+                explicit.resolve(),
+            )
+            self.assertEqual(
+                workspace_module.resolve_workspace_root(None, nested),
+                current.resolve(),
+            )
+
+    def test_workspace_resolution_falls_back_to_installed_source(self) -> None:
+        installed_module = (
+            self.root / "tools" / "hagency-cli" / "src" / "hagency_cli" / "workspace.py"
+        )
+        with tempfile.TemporaryDirectory() as outside_value:
+            outside = Path(outside_value)
+            with mock.patch.object(workspace_module, "__file__", str(installed_module)):
+                stdout, _stderr = self.run_cli("source", "list", cwd=outside)
+                values, completion_stderr = self.complete_bash(
+                    "hgc source show ", 3, cwd=outside
+                )
+
+        self.assertIn("local-source\tlocal", stdout)
+        self.assertEqual(values, ["local-source"])
+        self.assertEqual(completion_stderr, "")
+
+    def test_workspace_resolution_without_any_marker_preserves_error(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as outside_value,
+            tempfile.TemporaryDirectory() as installed_value,
+        ):
+            outside = Path(outside_value)
+            installed_module = (
+                Path(installed_value) / "site-packages" / "hagency_cli" / "workspace.py"
+            )
+            with mock.patch.object(workspace_module, "__file__", str(installed_module)):
+                _stdout, stderr = self.run_cli(
+                    "source", "list", cwd=outside, expected=1
+                )
+
+        self.assertEqual(
+            stderr, f"Error: not a hagency workspace: {outside.resolve()}\n"
+        )
+
+    def test_workspace_resolution_ignores_unrelated_install_ancestors(self) -> None:
+        with tempfile.TemporaryDirectory() as outside_value:
+            outside = Path(outside_value)
+            for module_path in (
+                "site-packages/hagency_cli/workspace.py",
+                "checkout/tools/hagency-cli/src/hagency_cli/workspace.py",
+            ):
+                with (
+                    self.subTest(module_path=module_path),
+                    mock.patch.object(
+                        workspace_module, "__file__", str(self.root / module_path)
+                    ),
+                ):
+                    _stdout, stderr = self.run_cli(
+                        "source", "list", cwd=outside, expected=1
+                    )
+                    self.assertIn("not a hagency workspace", stderr)
+
+    def test_workspace_source_fallback_requires_a_config_file(self) -> None:
+        checkout = self.root / "checkout"
+        (checkout / "hagency-config.toml").mkdir(parents=True)
+        installed_module = (
+            checkout / "tools" / "hagency-cli" / "src" / "hagency_cli" / "workspace.py"
+        )
+        with (
+            tempfile.TemporaryDirectory() as outside_value,
+            mock.patch.object(workspace_module, "__file__", str(installed_module)),
+        ):
+            _stdout, stderr = self.run_cli(
+                "source", "list", cwd=Path(outside_value), expected=1
+            )
+        self.assertIn("not a hagency workspace", stderr)
+
+    def test_init_does_not_fall_back_to_installed_source(self) -> None:
+        installed_module = (
+            self.root / "tools" / "hagency-cli" / "src" / "hagency_cli" / "workspace.py"
+        )
+        original_config = self.config_path.read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as outside_value:
+            outside = Path(outside_value)
+            with mock.patch.object(workspace_module, "__file__", str(installed_module)):
+                stdout, _stderr = self.run_cli("init", cwd=outside)
+
+            self.assertTrue((outside / "hagency-config.toml").is_file())
+            self.assertIn(f"initialized hagency workspace: {outside}", stdout)
+
+        self.assertEqual(self.config_path.read_text(encoding="utf-8"), original_config)
 
     def test_windows_git_bash_path_normalization(self) -> None:
         with mock.patch.object(common_module.os, "name", "nt"):
