@@ -1,3 +1,5 @@
+.DS_Store
+.agents/skills/
 
 # py
 __pycache__/
