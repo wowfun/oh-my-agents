@@ -68,3 +68,8 @@ url = "https://github.com/DreambigOu/ELI5.git"
 
 [source.reclaim-code-entropy.remote]
 url = "https://github.com/Yevanchen/reclaim-code-entropy.git"
+
+[source.baoyu-design]
+
+[source.baoyu-design.remote]
+url = "https://github.com/JimLiu/baoyu-design"
