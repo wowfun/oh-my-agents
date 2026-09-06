@@ -7,6 +7,7 @@ from functools import wraps
 from typing import get_type_hints
 
 import typer
+from typer.core import TyperGroup
 
 from hagency_cli.workspace.errors import (
     SkillNameConflictError,
@@ -57,8 +58,51 @@ def require_exactly_one(options: dict[str, object]) -> None:
         )
 
 
+class CommandGroup(TyperGroup):
+    """Group existing command aliases in help without hiding them from completion."""
+
+    aliases = {
+        "s": "source",
+        "p": "profile",
+        "ls": "list",
+        "rm": "remove",
+        "u": "update",
+    }
+
+    def format_commands(self, ctx, formatter) -> None:
+        commands = {
+            name: command
+            for name in self.list_commands(ctx)
+            if (command := self.get_command(ctx, name)) is not None
+            and not command.hidden
+        }
+        aliases = {
+            alias: name
+            for alias, name in self.aliases.items()
+            if alias in commands and name in commands
+        }
+        rows = []
+        for name, command in commands.items():
+            if name in aliases:
+                continue
+            label = ", ".join(
+                [name, *(alias for alias, target in aliases.items() if target == name)]
+            )
+            rows.append((label, command))
+        if rows:
+            limit = formatter.width - 6 - max(len(label) for label, _ in rows)
+            with formatter.section("Commands"):
+                formatter.write_dl(
+                    [
+                        (label, command.get_short_help_str(limit))
+                        for label, command in rows
+                    ]
+                )
+
+
 def make_app(*, help_text: str, add_completion: bool) -> typer.Typer:
     return typer.Typer(
+        cls=CommandGroup,
         help=help_text,
         add_completion=add_completion,
         context_settings={"help_option_names": ["-h", "--help"]},

@@ -13,15 +13,43 @@ from hagency_cli.commands.source import source_app
 from hagency_cli.commands.workspace import init_cli
 
 app = make_app(
-    help_text="Manage Hagency sources, skills, profiles, files, and services.",
+    help_text="""Manage Hagency sources, skills, profiles, files, and services.
+
+    Sources are local skill directories or persistent Git checkouts. Discover
+    skills, install them directly, or select them through reusable profiles.
+    File commands sync project trees over SFTP, transfer offline ZIP bundles,
+    and purge rebuildable artifacts. Services run the local model proxy.
+
+    Workspace commands find hagency-config.toml using their --root option,
+    then the current directory and its parents, then the editable-installed
+    Hagency Kit checkout. A wheel installation has no checkout fallback.
+    File commands use their own project roots; purge has separate scan roots.
+    Installation destinations resolve from the invocation directory.
+
+    Use hgc COMMAND --help, then hgc COMMAND SUBCOMMAND --help for prerequisites,
+    defaults, effects, and examples. Help works without a workspace or network.
+    The Hagency CLI README contains full configuration and troubleshooting
+    reference. Each command documents its own --dry-run behavior, if supported.
+
+    \b
+    Examples:
+      hgc init --root ./kit
+      hgc source add https://github.com/owner/repo.git --sync -r ./kit
+      hgc skill list -r ./kit
+      hgc skill add repo --all -d ./project -r ./kit --dry-run
+      hgc file push --help
+      hgc service model-proxy --help
+      hgc --install-completion
+      hgc --show-completion bash
+    """,
     add_completion=True,
 )
-app.command("init", help="Initialize a Hagency workspace.")(init_cli)
+app.command("init", short_help="Initialize a Hagency workspace.")(init_cli)
 app.add_typer(source_app, name="source")
-app.add_typer(source_app, name="s", help="Alias for source.")
+app.add_typer(source_app, name="s", short_help="Alias for source.")
 app.add_typer(skill_app, name="skill")
 app.add_typer(profile_app, name="profile")
-app.add_typer(profile_app, name="p", help="Alias for profile.")
+app.add_typer(profile_app, name="p", short_help="Alias for profile.")
 app.add_typer(file_app, name="file")
 app.add_typer(service_app, name="service")
 

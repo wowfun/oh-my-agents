@@ -274,8 +274,9 @@ class CliTests(unittest.TestCase):
         self.assertEqual(stderr, "")
         self.assertIn("--install-completion", stdout)
         self.assertIn("--show-completion", stdout)
-        self.assertIn("Alias for source.", stdout)
-        self.assertIn("Alias for profile.", stdout)
+        self.assertIn("source, s", stdout)
+        self.assertIn("profile, p", stdout)
+        self.assertNotIn("Alias for", stdout)
 
         _stdout, stderr = self.run_cli(expected=2, color=True)
         self.assertIn("Missing command", stderr)

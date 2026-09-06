@@ -17,6 +17,7 @@ from typer.main import get_command
 
 from hagency_cli import cli
 from hagency_cli.commands import file as file_commands
+from hagency_cli.commands.shared import CommandGroup
 from hagency_cli.files.sync.models import SyncDirection
 from hagency_cli.workspace.discovery import init_workspace
 from hagency_cli.workspace.git import run
@@ -136,18 +137,59 @@ class ArchitectureTests(unittest.TestCase):
     def test_normal_commands_and_help_do_not_load_optional_runtime_modules(self):
         code = """
 import contextlib, io, json, sys
+from pathlib import Path
+from unittest import mock
+class RejectRuntimeImports:
+    def find_spec(self, fullname, path=None, target=None):
+        for prefix in ('aiohttp', 'paramiko', 'questionary',
+                       'hagency_cli.model_proxy.server'):
+            if fullname == prefix or fullname.startswith(prefix + '.'):
+                raise AssertionError('help imported runtime module: ' + fullname)
+        return None
+sys.meta_path.insert(0, RejectRuntimeImports())
 from hagency_cli.cli import app, main
 from typer.main import get_command
 def paths(command, prefix=()):
     yield prefix
     for name, child in getattr(command, 'commands', {}).items():
         yield from paths(child, (*prefix, name))
-with contextlib.redirect_stdout(io.StringIO()):
-    for path in paths(get_command(app)):
-        try:
-            main([*path, '--help'])
-        except SystemExit as error:
-            assert error.code == 0
+command_paths = list(paths(get_command(app)))
+for invalid_config in (False, True):
+    if invalid_config:
+        Path('hagency-config.toml').write_text('invalid = [')
+        Path('hagency-model-proxy.toml').write_text('invalid = [')
+        Path('.vscode').mkdir()
+        Path('.vscode/sftp.json').write_text('{invalid')
+    before = {str(p): p.read_bytes() if p.is_file() else None
+              for p in Path('.').rglob('*')}
+    with (
+        mock.patch('subprocess.Popen', side_effect=AssertionError('spawned a process')),
+        mock.patch('socket.socket', side_effect=AssertionError('opened a socket')),
+        mock.patch('builtins.input', side_effect=AssertionError('prompted for input')),
+        mock.patch('hagency_cli.workspace.discovery.resolve_workspace_root',
+                   side_effect=AssertionError('resolved a workspace')),
+        mock.patch('hagency_cli.workspace.context.resolve_workspace_root',
+                   side_effect=AssertionError('resolved a workspace')),
+        mock.patch('hagency_cli.workspace.operations.skills.resolve_workspace_root',
+                   side_effect=AssertionError('resolved a workspace')),
+        mock.patch('hagency_cli.commands.completion.resolve_workspace_root',
+                   side_effect=AssertionError('resolved a workspace')),
+    ):
+        for path in command_paths:
+            for flag in ('-h', '--help'):
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    try:
+                        main([*path, flag])
+                    except SystemExit as error:
+                        assert error.code == 0, (path, stderr.getvalue())
+                    else:
+                        raise AssertionError(('help did not exit', path))
+                assert stderr.getvalue() == '', (path, stderr.getvalue())
+                assert 'Examples:' in stdout.getvalue(), path
+    after = {str(p): p.read_bytes() if p.is_file() else None
+             for p in Path('.').rglob('*')}
+    assert before == after, 'help changed files'
 print(json.dumps(sorted(sys.modules)))
 """
         with tempfile.TemporaryDirectory() as directory:
@@ -294,6 +336,136 @@ class CommandTreeTests(unittest.TestCase):
         )
         self.assertEqual(set(command.commands["s"].commands), expected["source"])
         self.assertEqual(set(command.commands["p"].commands), expected["profile"])
+
+    def test_help_alias_map_matches_registered_callbacks_and_groups(self):
+        found_aliases = {}
+        visited = set()
+
+        def inspect_app(app):
+            if id(app) in visited:
+                return
+            visited.add(id(app))
+            registrations = [
+                (item.name, item.callback) for item in app.registered_commands
+            ] + [(item.name, item.typer_instance) for item in app.registered_groups]
+            targets = dict(registrations)
+            canonical_names = {}
+            for name, target in registrations:
+                if target in canonical_names:
+                    canonical = canonical_names[target]
+                    self.assertEqual(CommandGroup.aliases.get(name), canonical)
+                    found_aliases[name] = canonical
+                else:
+                    canonical_names[target] = name
+
+            # A matching spelling alone must never collapse distinct commands.
+            for alias, canonical in CommandGroup.aliases.items():
+                if alias in targets and canonical in targets:
+                    self.assertIs(targets[alias], targets[canonical], alias)
+            for item in app.registered_groups:
+                inspect_app(item.typer_instance)
+
+        inspect_app(cli.app)
+        self.assertEqual(found_aliases, CommandGroup.aliases)
+
+    def test_alias_help_matches_full_names_and_lists_aliases_together(self):
+        aliases = {
+            "s": "source",
+            "p": "profile",
+            "ls": "list",
+            "rm": "remove",
+            "u": "update",
+        }
+
+        def paths(command, prefix=()):
+            yield prefix
+            for name, child in getattr(command, "commands", {}).items():
+                yield from paths(child, (*prefix, name))
+
+        for path in paths(get_command(cli.app)):
+            canonical = tuple(aliases.get(part, part) for part in path)
+            if canonical == path:
+                continue
+            with self.subTest(path=path):
+                stdout, stderr = self.run_main(*path, "--help")
+                full, full_stderr = self.run_main(*canonical, "--help")
+                self.assertEqual((stderr, full_stderr), ("", ""))
+                # The invoked spelling appears in Usage; all operational help is shared.
+                self.assertEqual(stdout.split("\n\n", 1)[1], full.split("\n\n", 1)[1])
+                self.assertIn("Examples:", stdout)
+
+        for path, labels in (
+            ((), ("source, s", "profile, p")),
+            (("source",), ("list, ls", "remove, rm")),
+            (("skill",), ("list, ls",)),
+            (("profile",), ("list, ls", "update, u", "remove, rm")),
+        ):
+            with self.subTest(group=path):
+                stdout, _stderr = self.run_main(*path, "--help")
+                command_list = stdout.split("Commands:\n", 1)[1]
+                self.assertNotIn("Alias for", command_list)
+                for label in labels:
+                    self.assertIn(label, command_list)
+                    canonical, alias = label.split(", ")
+                    self.assertFalse(
+                        any(
+                            line.startswith(f"  {alias} ")
+                            for line in command_list.splitlines()
+                        )
+                    )
+
+    def test_help_explains_operation_boundaries(self):
+        cases = {
+            ("init",): ("does not search parent", "--force", "--dry-run"),
+            ("source", "sync"): ("1-based", "local-only commits", "without fetching"),
+            ("source", "remove"): ("only the registry entry", "profile references"),
+            ("skill", "add"): (
+                "./.agents/skills",
+                "mutually exclusive",
+                "non-TTY",
+                "provisional report",
+                "Cancellation or fetch failure",
+            ),
+            ("profile", "apply"): (
+                "exactly one",
+                "DIR/.agents/skills",
+                "Non-TTY",
+                "no tracking or pruning",
+            ),
+            ("file", "push"): ("still connects", "--git-changed", "no deletion"),
+            ("file", "pull"): ("still connects", "Local-only paths", "--delete"),
+            ("file", "sync"): (
+                "exact timestamp tie",
+                "not supported",
+                "still connects",
+            ),
+            ("file", "pack"): (
+                "No network connection",
+                "creates no ZIP",
+                "--no-config",
+            ),
+            ("file", "apply"): (
+                "before any destination write",
+                "manifest deletion markers",
+            ),
+            ("file", "purge"): ("Non-TTY", "always preview", "Permanent deletion"),
+            ("service", "model-proxy", "start"): (
+                "mutually exclusive",
+                "127.0.0.1:8765",
+                "same resolved config path",
+            ),
+            ("service", "model-proxy", "restart"): (
+                "repeat custom",
+                "old worker remains stopped",
+            ),
+        }
+        for path, phrases in cases.items():
+            with self.subTest(path=path):
+                stdout, stderr = self.run_main(*path, "--help")
+                self.assertEqual(stderr, "")
+                normalized = " ".join(stdout.split())
+                for phrase in phrases:
+                    self.assertIn(phrase, normalized)
 
     def test_old_entrypoints_are_rejected(self):
         cases = [
