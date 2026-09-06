@@ -5,11 +5,11 @@ from pathlib import Path
 
 import questionary
 
-from .profiles import SkillLinkCandidate
+from hagency_cli.workspace.skills import SkillLinkCandidate
 
 
 class QuestionarySkillConflictUI:
-    """Interactive profile skill conflict prompts backed by Questionary."""
+    """Skill selection and conflict prompts backed by Questionary."""
 
     def is_interactive(self) -> bool:
         return sys.stdin.isatty() and sys.stdout.isatty()
@@ -29,6 +29,25 @@ class QuestionarySkillConflictUI:
                 ],
             )
             return prompt.unsafe_ask()
+        except (EOFError, KeyboardInterrupt):
+            return None
+
+    def choose_skills(
+        self, candidates: tuple[SkillLinkCandidate, ...]
+    ) -> tuple[Path, ...] | None:
+        try:
+            result = questionary.checkbox(
+                "Choose skills to install",
+                choices=[
+                    questionary.Choice(
+                        title=f"{candidate.name}: {candidate.target}",
+                        value=candidate.target,
+                        checked=False,
+                    )
+                    for candidate in candidates
+                ],
+            ).unsafe_ask()
+            return tuple(result) if result is not None else None
         except (EOFError, KeyboardInterrupt):
             return None
 

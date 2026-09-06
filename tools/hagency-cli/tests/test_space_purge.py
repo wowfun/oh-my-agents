@@ -14,16 +14,21 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from hagency_cli.space import purge as purge_module
-from hagency_cli.space.purge import (
+
+import hagency_cli.files.purge.models as files_purge_models_module
+import hagency_cli.files.purge.operations as files_purge_operations_module
+import hagency_cli.files.purge.removal as files_purge_removal_module
+import hagency_cli.files.purge.roots as files_purge_roots_module
+import hagency_cli.files.purge.scan as files_purge_scan_module
+from hagency_cli.files.purge.models import (
     Activity,
     ItemDisposition,
     PurgeChoice,
     PurgeDisposition,
     PurgeRequest,
-    purge_config_path,
-    purge_space,
 )
+from hagency_cli.files.purge.operations import purge_space
+from hagency_cli.files.purge.roots import purge_config_path
 
 
 class FakePurgeUI:
@@ -89,7 +94,7 @@ class SpacePurgeTests(unittest.TestCase):
         return artifact
 
     def make_old(self, path: Path) -> None:
-        timestamp = time.time() - purge_module.MIN_AGE_SECONDS - 60
+        timestamp = time.time() - files_purge_models_module.MIN_AGE_SECONDS - 60
         descendants = sorted(
             path.rglob("*"), key=lambda child: len(child.parts), reverse=True
         )
@@ -266,7 +271,9 @@ class SpacePurgeTests(unittest.TestCase):
             args=["git"], returncode=128, stdout=b"", stderr=b"not a repository"
         )
 
-        with mock.patch.object(purge_module.subprocess, "run", return_value=failed):
+        with mock.patch.object(
+            files_purge_roots_module.subprocess, "run", return_value=failed
+        ):
             report = purge_space(
                 PurgeRequest(paths=(root,), dry_run=True),
                 ui=FakePurgeUI(interactive=False),
@@ -348,7 +355,7 @@ class SpacePurgeTests(unittest.TestCase):
         )
 
         with (
-            mock.patch.object(purge_module.Path, "home", return_value=home),
+            mock.patch.object(files_purge_roots_module.Path, "home", return_value=home),
             mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(xdg)}, clear=False),
         ):
             report = purge_space(
@@ -379,7 +386,7 @@ class SpacePurgeTests(unittest.TestCase):
         config_path.write_text("# no configured paths\n", encoding="utf-8")
 
         with (
-            mock.patch.object(purge_module.Path, "home", return_value=home),
+            mock.patch.object(files_purge_roots_module.Path, "home", return_value=home),
             mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(xdg)}, clear=False),
         ):
             report = purge_space(
@@ -409,7 +416,7 @@ class SpacePurgeTests(unittest.TestCase):
         config_path.write_text(f"{configured_root}\n", encoding="utf-8")
 
         with (
-            mock.patch.object(purge_module.Path, "home", return_value=home),
+            mock.patch.object(files_purge_roots_module.Path, "home", return_value=home),
             mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(xdg)}, clear=False),
         ):
             report = purge_space(
@@ -430,14 +437,14 @@ class SpacePurgeTests(unittest.TestCase):
         project = self.make_project(root, "project")
         valid = project / "custom-cache"
         valid.mkdir()
-        (valid / purge_module.CACHEDIR_TAG_NAME).write_bytes(
-            purge_module.CACHEDIR_TAG_SIGNATURE + b"\n"
+        (valid / files_purge_models_module.CACHEDIR_TAG_NAME).write_bytes(
+            files_purge_models_module.CACHEDIR_TAG_SIGNATURE + b"\n"
         )
         (valid / "payload.bin").write_bytes(b"x" * 4096)
         self.make_old(valid)
         invalid = project / "not-a-cache"
         invalid.mkdir()
-        (invalid / purge_module.CACHEDIR_TAG_NAME).write_text(
+        (invalid / files_purge_models_module.CACHEDIR_TAG_NAME).write_text(
             "invalid signature\n", encoding="utf-8"
         )
         (invalid / "payload.bin").write_bytes(b"x" * 4096)
@@ -451,7 +458,7 @@ class SpacePurgeTests(unittest.TestCase):
             [choice.exact_path for choice in report.choices], [valid.resolve()]
         )
         self.assertEqual(
-            report.choices[0].artifact_kind, purge_module.CACHEDIR_TAG_NAME
+            report.choices[0].artifact_kind, files_purge_models_module.CACHEDIR_TAG_NAME
         )
 
     def test_vendor_and_bin_require_matching_project_context(self) -> None:
@@ -499,7 +506,9 @@ class SpacePurgeTests(unittest.TestCase):
         linked_container.symlink_to(real_container, target_is_directory=True)
         linked_nested_root = linked_container / "nested"
 
-        with mock.patch.object(purge_module.Path, "home", return_value=home):
+        with mock.patch.object(
+            files_purge_roots_module.Path, "home", return_value=home
+        ):
             home_report = purge_space(
                 PurgeRequest(paths=(home,)), ui=FakePurgeUI(interactive=False)
             )
@@ -579,8 +588,8 @@ class SpacePurgeTests(unittest.TestCase):
         project = self.make_project(root, "project")
         candidate = project / "custom-cache"
         candidate.mkdir()
-        tag = candidate / purge_module.CACHEDIR_TAG_NAME
-        tag.write_bytes(purge_module.CACHEDIR_TAG_SIGNATURE + b"\n")
+        tag = candidate / files_purge_models_module.CACHEDIR_TAG_NAME
+        tag.write_bytes(files_purge_models_module.CACHEDIR_TAG_SIGNATURE + b"\n")
         (candidate / "payload.bin").write_bytes(b"x" * 4096)
         self.make_old(candidate)
 
@@ -610,7 +619,7 @@ class SpacePurgeTests(unittest.TestCase):
         (project / "composer.json").write_text("{}\n", encoding="utf-8")
         (project / "app.csproj").write_text("<Project />\n", encoding="utf-8")
 
-        for name in sorted(purge_module.PURGE_TARGETS):
+        for name in sorted(files_purge_models_module.PURGE_TARGETS):
             artifact = project / name
             if name == "bin":
                 (artifact / "Debug").mkdir(parents=True)
@@ -623,15 +632,15 @@ class SpacePurgeTests(unittest.TestCase):
 
         deep_six = project / "one/two/three/four/five/.cache-six"
         deep_six.mkdir(parents=True)
-        (deep_six / purge_module.CACHEDIR_TAG_NAME).write_bytes(
-            purge_module.CACHEDIR_TAG_SIGNATURE
+        (deep_six / files_purge_models_module.CACHEDIR_TAG_NAME).write_bytes(
+            files_purge_models_module.CACHEDIR_TAG_SIGNATURE
         )
         (deep_six / "payload.bin").write_bytes(b"x" * 4096)
         self.make_old(deep_six)
         too_deep = project / "a/b/c/d/e/f/.cache-seven"
         too_deep.mkdir(parents=True)
-        (too_deep / purge_module.CACHEDIR_TAG_NAME).write_bytes(
-            purge_module.CACHEDIR_TAG_SIGNATURE
+        (too_deep / files_purge_models_module.CACHEDIR_TAG_NAME).write_bytes(
+            files_purge_models_module.CACHEDIR_TAG_SIGNATURE
         )
         (too_deep / "payload.bin").write_bytes(b"x" * 4096)
         self.make_old(too_deep)
@@ -644,9 +653,9 @@ class SpacePurgeTests(unittest.TestCase):
         named = {
             choice.artifact_kind
             for choice in report.choices
-            if choice.artifact_kind != purge_module.CACHEDIR_TAG_NAME
+            if choice.artifact_kind != files_purge_models_module.CACHEDIR_TAG_NAME
         }
-        self.assertEqual(named, set(purge_module.PURGE_TARGETS))
+        self.assertEqual(named, set(files_purge_models_module.PURGE_TARGETS))
         paths = [choice.exact_path for choice in report.choices]
         self.assertEqual(paths.count((project / "node_modules").resolve()), 1)
         self.assertIn(deep_six.resolve(), paths)
@@ -682,7 +691,7 @@ class SpacePurgeTests(unittest.TestCase):
         for project in projects.values():
             self.make_artifact(project, "build")
 
-        shared = purge_module._HardlinkEntry((99, 101), 100)
+        shared = files_purge_models_module._HardlinkEntry((99, 101), 100)
 
         def measured(path: Path, _now: float):
             if path.parent.name in {"a", "b"}:
@@ -690,7 +699,7 @@ class SpacePurgeTests(unittest.TestCase):
             return 60, Activity.OLD, None, ()
 
         with mock.patch.object(
-            purge_module, "_measure_candidate", side_effect=measured
+            files_purge_scan_module, "_measure_candidate", side_effect=measured
         ):
             report = purge_space(
                 PurgeRequest(paths=(root,), dry_run=True),
@@ -702,10 +711,28 @@ class SpacePurgeTests(unittest.TestCase):
             ["a", "c", "b"],
         )
 
+    def test_measurement_failure_after_confirmation_prevents_removal(self) -> None:
+        root = self.base / "scan"
+        artifact = self.make_artifact(self.make_project(root, "project"), "build")
+        ui = FakePurgeUI(interactive=True, select=self.all_choice_ids, confirm=True)
+        with mock.patch.object(
+            files_purge_removal_module,
+            "_measure_candidate",
+            return_value=(None, Activity.UNCERTAIN, "injected read failure", ()),
+        ) as measure:
+            report = purge_space(PurgeRequest(paths=(root,)), ui=ui)
+        self.assertEqual(len(ui.confirm_calls), 1)
+        measure.assert_called_once()
+        self.assertTrue(artifact.exists())
+        self.assertEqual(report.exit_code, 1)
+        self.assertTrue(
+            any("activity safety check failed" in str(item) for item in report.results)
+        )
+
     def test_incomplete_discovery_and_measurement_exit_one(self) -> None:
         home = self.base / "home"
         home.mkdir()
-        real_scandir = purge_module.os.scandir
+        real_scandir = files_purge_roots_module.os.scandir
 
         def fail_home(path: os.PathLike[str] | str):
             if Path(path) == home:
@@ -713,8 +740,10 @@ class SpacePurgeTests(unittest.TestCase):
             return real_scandir(path)
 
         with (
-            mock.patch.object(purge_module.Path, "home", return_value=home),
-            mock.patch.object(purge_module.os, "scandir", side_effect=fail_home),
+            mock.patch.object(files_purge_roots_module.Path, "home", return_value=home),
+            mock.patch.object(
+                files_purge_roots_module.os, "scandir", side_effect=fail_home
+            ),
         ):
             discovery = purge_space(
                 PurgeRequest(dry_run=True), ui=FakePurgeUI(interactive=False)
@@ -729,7 +758,7 @@ class SpacePurgeTests(unittest.TestCase):
         root = self.base / "scan"
         self.make_artifact(self.make_project(root, "project"), "target")
         with mock.patch.object(
-            purge_module,
+            files_purge_scan_module,
             "_measure_candidate",
             return_value=(None, Activity.UNCERTAIN, "permission denied", ()),
         ):
@@ -768,7 +797,7 @@ class SpacePurgeTests(unittest.TestCase):
             first = self.make_artifact(project, "build", size=8192)
         if not second.exists():
             second = self.make_artifact(project, "dist", size=4096)
-        original_remove = purge_module._permanently_remove
+        original_remove = files_purge_removal_module._permanently_remove
 
         def fail_one(candidate: object) -> None:
             if candidate.choice.exact_path.name == "build":
@@ -776,7 +805,7 @@ class SpacePurgeTests(unittest.TestCase):
             original_remove(candidate)
 
         with mock.patch.object(
-            purge_module, "_permanently_remove", side_effect=fail_one
+            files_purge_operations_module, "_permanently_remove", side_effect=fail_one
         ):
             partial = purge_space(
                 PurgeRequest(paths=(root,)),
@@ -873,7 +902,7 @@ class SpacePurgeTests(unittest.TestCase):
         xdg = home / "config"
 
         with (
-            mock.patch.object(purge_module.Path, "home", return_value=home),
+            mock.patch.object(files_purge_roots_module.Path, "home", return_value=home),
             mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(xdg)}, clear=False),
         ):
             report = purge_space(
@@ -902,7 +931,7 @@ class SpacePurgeTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 0)
 
         with (
-            mock.patch.object(purge_module.Path, "home", return_value=home),
+            mock.patch.object(files_purge_roots_module.Path, "home", return_value=home),
             mock.patch.dict(
                 os.environ,
                 {
@@ -912,9 +941,11 @@ class SpacePurgeTests(unittest.TestCase):
                 },
                 clear=True,
             ),
-            mock.patch.object(purge_module.subprocess, "run", side_effect=edit_config),
+            mock.patch.object(
+                files_purge_roots_module.subprocess, "run", side_effect=edit_config
+            ),
         ):
-            report = purge_module.edit_purge_paths()
+            report = files_purge_roots_module.edit_purge_paths()
 
         self.assertEqual(report.exit_code, 0)
         self.assertEqual(report.config_path, expected_config)
@@ -922,8 +953,8 @@ class SpacePurgeTests(unittest.TestCase):
         self.assertEqual(report.after_roots, (configured_root.resolve(),))
         self.assertTrue(expected_config.exists())
 
-        with mock.patch.object(purge_module.sys, "platform", "win32"):
-            command = purge_module._split_editor_command(
+        with mock.patch.object(files_purge_roots_module.sys, "platform", "win32"):
+            command = files_purge_roots_module._split_editor_command(
                 '"C:\\Program Files\\Editor\\editor.exe" --wait'
             )
         self.assertEqual(
@@ -944,7 +975,7 @@ class SpacePurgeTests(unittest.TestCase):
                 config_path.write_text("user-created\n", encoding="utf-8")
 
         with mock.patch.object(Path, "mkdir", racing_mkdir):
-            purge_module._write_config_template(config_path)
+            files_purge_roots_module._write_config_template(config_path)
 
         self.assertEqual(config_path.read_text(encoding="utf-8"), "user-created\n")
 
@@ -958,7 +989,7 @@ class SpacePurgeTests(unittest.TestCase):
         self.make_old(artifact)
 
         with mock.patch.object(
-            purge_module.os.path,
+            files_purge_roots_module.os.path,
             "ismount",
             side_effect=lambda path: Path(path) == nested_mount,
         ):

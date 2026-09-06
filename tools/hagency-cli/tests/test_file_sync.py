@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -20,9 +21,24 @@ from typer.testing import CliRunner
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+import hagency_cli.commands.file as commands_file_module
+import hagency_cli.files.sync.bundle.format as files_sync_bundle_format_module
+import hagency_cli.files.sync.bundle.pack as files_sync_bundle_pack_module
+import hagency_cli.files.sync.operations as files_sync_operations_module
+import hagency_cli.files.sync.sftp as files_sync_sftp_module
 from hagency_cli import cli
-from hagency_cli import file_sync as file_sync_module
-from hagency_cli.file_sync import (
+from hagency_cli.files.sync.bundle.apply import apply_sync_bundle
+from hagency_cli.files.sync.bundle.format import verify_sync_bundle
+from hagency_cli.files.sync.bundle.pack import pack_sync_bundle
+from hagency_cli.files.sync.config import (
+    build_temporary_sftp_config,
+    initialize_sftp_config,
+    load_local_sync_selection,
+    load_sftp_config,
+    parse_remote_endpoint,
+    render_default_sftp_config,
+)
+from hagency_cli.files.sync.models import (
     BUNDLE_FORMAT,
     BUNDLE_MANIFEST_PATH,
     BUNDLE_VERSION,
@@ -33,28 +49,21 @@ from hagency_cli.file_sync import (
     FileEntry,
     FileSyncConfigError,
     FileSyncError,
-    IgnoreMatcher,
     RemoteEndpoint,
-    SFTPRemote,
     Snapshot,
     SyncAction,
     SyncDirection,
     SyncOptions,
     SyncReport,
-    apply_sync_bundle,
-    build_sync_plan,
-    build_temporary_sftp_config,
-    git_changed_paths,
-    initialize_sftp_config,
-    load_local_sync_selection,
-    load_sftp_config,
-    pack_sync_bundle,
-    parse_remote_endpoint,
-    render_default_sftp_config,
-    scan_local,
-    sync_workspace_files,
-    verify_sync_bundle,
 )
+from hagency_cli.files.sync.operations import sync_workspace_files
+from hagency_cli.files.sync.planning import build_sync_plan
+from hagency_cli.files.sync.selection import (
+    IgnoreMatcher,
+    git_changed_paths,
+    scan_local,
+)
+from hagency_cli.files.sync.sftp import SFTPRemote
 
 
 def file_entry(*, mtime: float = 1, size: int = 1) -> FileEntry:
@@ -94,93 +103,10 @@ class FakeRemote:
         self.applied.append((action, local_root))
 
 
-class LocalSFTPAdapter:
-    def __init__(self, root: Path) -> None:
-        self.root = root
-
-    def _path(self, remote_path: str) -> Path:
-        normalized = PurePosixPath(remote_path.replace("\\", "/"))
-        return self.root.joinpath(
-            *(part for part in normalized.parts if part not in {"/", "."})
-        )
-
-    @staticmethod
-    def _attrs(path: Path, filename: str | None = None):
-        info = path.lstat()
-        return SimpleNamespace(
-            filename=filename or path.name,
-            st_mode=info.st_mode,
-            st_size=info.st_size,
-            st_mtime=info.st_mtime,
-        )
-
-    def lstat(self, remote_path: str):
-        return self._attrs(self._path(remote_path))
-
-    def listdir_attr(self, remote_path: str):
-        path = self._path(remote_path)
-        return [self._attrs(child) for child in path.iterdir()]
-
-    def listdir(self, remote_path: str):
-        return [child.name for child in self._path(remote_path).iterdir()]
-
-    def readlink(self, remote_path: str):
-        return os.readlink(self._path(remote_path))
-
-    def mkdir(self, remote_path: str, mode: int | None = None):
-        path = self._path(remote_path)
-        path.mkdir()
-        if mode is not None:
-            path.chmod(mode)
-
-    def chmod(self, remote_path: str, mode: int):
-        self._path(remote_path).chmod(mode)
-
-    def remove(self, remote_path: str):
-        self._path(remote_path).unlink()
-
-    def rmdir(self, remote_path: str):
-        self._path(remote_path).rmdir()
-
-    def put(self, local_path: str, remote_path: str, *, confirm: bool):
-        self.assert_confirm(confirm)
-        shutil.copyfile(local_path, self._path(remote_path))
-
-    def get(self, remote_path: str, local_path: str):
-        shutil.copyfile(self._path(remote_path), local_path)
-
-    def open(self, remote_path: str, mode: str):
-        return self._path(remote_path).open(mode)
-
-    def utime(self, remote_path: str, times: tuple[float, float]):
-        os.utime(self._path(remote_path), times)
-
-    def rename(self, source: str, destination: str):
-        self._path(source).rename(self._path(destination))
-
-    def posix_rename(self, source: str, destination: str):
-        os.replace(self._path(source), self._path(destination))
-
-    def symlink(self, target: str, remote_path: str):
-        os.symlink(target, self._path(remote_path))
-
-    @staticmethod
-    def assert_confirm(confirm: bool) -> None:
-        if not confirm:
-            raise AssertionError("SFTP uploads must confirm the remote stat")
-
-
-class LocalSFTPRemote(SFTPRemote):
-    def __init__(self, config, root: Path) -> None:
-        super().__init__(config)
-        self.adapter = LocalSFTPAdapter(root)
-
-    def __enter__(self):
-        self._sftp = self.adapter
-        return self
-
-    def __exit__(self, *_args):
-        self._sftp = None
+if __package__:
+    from .support import LocalSFTPAdapter, LocalSFTPRemote
+else:
+    from support import LocalSFTPAdapter, LocalSFTPRemote
 
 
 class FileSyncTests(unittest.TestCase):
@@ -239,7 +165,9 @@ class FileSyncTests(unittest.TestCase):
             archive.writestr(BUNDLE_MANIFEST_PATH, manifest + b" " * (1024 * 1024))
         target = self.root / "target"
         with (
-            mock.patch.object(file_sync_module, "BUNDLE_MANIFEST_MAX_BYTES", 1024),
+            mock.patch.object(
+                files_sync_bundle_format_module, "BUNDLE_MANIFEST_MAX_BYTES", 1024
+            ),
             mock.patch.object(zipfile.ZipFile, "open") as open_entry,
             self.assertRaisesRegex(FileSyncConfigError, "manifest.*exceeds"),
         ):
@@ -270,7 +198,9 @@ class FileSyncTests(unittest.TestCase):
         for dry_run in (True, False):
             with (
                 self.subTest(dry_run=dry_run),
-                mock.patch.object(file_sync_module, "BUNDLE_MANIFEST_MAX_BYTES", 32),
+                mock.patch.object(
+                    files_sync_bundle_format_module, "BUNDLE_MANIFEST_MAX_BYTES", 32
+                ),
                 self.assertRaisesRegex(FileSyncConfigError, "manifest.*exceeds"),
             ):
                 pack_sync_bundle(
@@ -323,7 +253,7 @@ class FileSyncTests(unittest.TestCase):
         remote = LocalSFTPRemote(load_sftp_config(project), remote_store)
         with (
             mock.patch.object(
-                file_sync_module,
+                files_sync_operations_module,
                 "git_changed_paths",
                 return_value=frozenset({PurePosixPath("shared.txt")}),
             ),
@@ -355,7 +285,7 @@ class FileSyncTests(unittest.TestCase):
         bundle = self.root / "patch.zip"
         with (
             mock.patch.object(
-                file_sync_module,
+                files_sync_bundle_pack_module,
                 "git_changed_paths",
                 return_value=frozenset({PurePosixPath("changed/file.txt")}),
             ),
@@ -490,6 +420,210 @@ class FileSyncTests(unittest.TestCase):
     def read_bundle_manifest(bundle: Path) -> dict:
         with zipfile.ZipFile(bundle, "r") as archive:
             return json.loads(archive.read(BUNDLE_MANIFEST_PATH))
+
+    @staticmethod
+    def write_test_bundle(
+        bundle: Path,
+        files: dict[str, bytes],
+        *,
+        deletions: tuple[str, ...] = (),
+        ignore: tuple[str, ...] = (),
+    ) -> None:
+        parents = {
+            parent.as_posix()
+            for name in files
+            for parent in PurePosixPath(name).parents
+            if parent.parts
+        }
+        manifest = {
+            "format": BUNDLE_FORMAT,
+            "version": BUNDLE_VERSION,
+            "mode": "git-patch" if deletions else "full",
+            "created_at": "2026-09-06T00:00:00Z",
+            "entries": [
+                {
+                    "path": name,
+                    "kind": "directory" if name in parents else "file",
+                    "size": 0 if name in parents else len(files[name]),
+                    "mtime_ns": 0,
+                    "mode": 0o755 if name in parents else 0o644,
+                    "sha256": None
+                    if name in parents
+                    else hashlib.sha256(files[name]).hexdigest(),
+                }
+                for name in sorted(parents | files.keys())
+            ],
+            "deletions": list(deletions),
+            "ignore": list(ignore),
+            "skipped_symlinks": [],
+        }
+        with zipfile.ZipFile(bundle, "w") as archive:
+            archive.writestr(BUNDLE_MANIFEST_PATH, json.dumps(manifest))
+            for name, data in files.items():
+                archive.writestr(f"payload/{name}", data)
+
+    def test_apply_rejects_protected_and_ignored_manifest_paths_before_writes(
+        self,
+    ) -> None:
+        cases = (
+            (".git/hooks/pre-commit", ("!.git/**",)),
+            (".git", ()),
+            (".GIT/config", ()),
+            ("nested/.git/config", ()),
+            (".vscode/sftp.json", ("!**/.vscode/sftp.json",)),
+            ("nested/.vscode/sftp.json", ()),
+            ("nested/.VSCODE/SFTP.JSON", ()),
+            ("ignored/file.txt", ("ignored/",)),
+        )
+        for index, (path, ignore) in enumerate(cases):
+            for deletion in (False, True):
+                bundle = self.root / f"protected-{index}-{deletion}.zip"
+                files = {"safe.txt": b"must not write"}
+                if not deletion:
+                    files[path] = b"replacement fixture"
+                self.write_test_bundle(
+                    bundle,
+                    files,
+                    deletions=(path,) if deletion else (),
+                    ignore=ignore,
+                )
+                for dry_run in (False, True):
+                    with self.subTest(path=path, deletion=deletion, dry_run=dry_run):
+                        target = self.root / f"target-{index}-{deletion}-{dry_run}"
+                        with self.assertRaisesRegex(
+                            FileSyncConfigError, "protected|ignored"
+                        ):
+                            apply_sync_bundle(
+                                bundle, target, delete=True, dry_run=dry_run
+                            )
+                        self.assertFalse(target.exists())
+
+    def test_apply_rejection_preserves_existing_config_and_other_files(self) -> None:
+        target = self.root / "protected-target"
+        config = target / ".vscode" / "sftp.json"
+        config.parent.mkdir(parents=True)
+        config.write_text("original", encoding="utf-8")
+        sentinel = target / "sentinel.txt"
+        sentinel.write_text("keep", encoding="utf-8")
+        bundle = self.root / "protected.zip"
+        self.write_test_bundle(
+            bundle,
+            {"safe.txt": b"must not write", ".vscode/sftp.json": b"replacement"},
+        )
+        with self.assertRaisesRegex(FileSyncConfigError, "protected|ignored"):
+            apply_sync_bundle(bundle, target, delete=True)
+        self.assertEqual(config.read_text(), "original")
+        self.assertEqual(sentinel.read_text(), "keep")
+        self.assertFalse((target / "safe.txt").exists())
+
+    def test_bundle_metadata_is_checked_before_reading_payloads(self) -> None:
+        bundle = self.root / "early-rejection.zip"
+        self.write_test_bundle(bundle, {".git/hooks/pre-commit": b"fixture"})
+        opened = []
+        original_open = zipfile.ZipFile.open
+
+        def record_open(archive, name, *args, **kwargs):
+            opened.append(name.filename if isinstance(name, zipfile.ZipInfo) else name)
+            return original_open(archive, name, *args, **kwargs)
+
+        with (
+            mock.patch.object(zipfile.ZipFile, "open", record_open),
+            self.assertRaisesRegex(FileSyncConfigError, "protected|ignored"),
+        ):
+            verify_sync_bundle(bundle)
+        self.assertEqual(opened, [BUNDLE_MANIFEST_PATH])
+
+    def test_full_bundle_keeps_existing_git_metadata_and_nested_configs(self) -> None:
+        source = self.root / "metadata-source"
+        target = self.root / "metadata-target"
+        for root in (source, target):
+            (root / "nested" / ".VSCODE").mkdir(parents=True)
+            (root / ".git").write_text("gitdir: fixture", encoding="utf-8")
+            (root / "nested" / ".VSCODE" / "SFTP.JSON").write_text(
+                "credentials", encoding="utf-8"
+            )
+        (source / "safe.txt").write_text("safe", encoding="utf-8")
+        bundle = self.root / "metadata.zip"
+        report = pack_sync_bundle(source, no_config=True, output_path=bundle)
+        self.assertNotIn(
+            PurePosixPath(".git"), {entry.path for entry in report.manifest.entries}
+        )
+        apply_sync_bundle(bundle, target, delete=True)
+        self.assertEqual((target / ".git").read_text(), "gitdir: fixture")
+        self.assertEqual(
+            (target / "nested" / ".VSCODE" / "SFTP.JSON").read_text(), "credentials"
+        )
+        self.assertEqual((target / "safe.txt").read_text(), "safe")
+
+    def test_bundle_rejects_deletions_below_ignored_or_skipped_parents(self) -> None:
+        for skipped in (False, True):
+            with self.subTest(skipped=skipped):
+                bundle = self.root / f"ignored-parent-{skipped}.zip"
+                self.write_test_bundle(
+                    bundle,
+                    {"safe.txt": b"must not write"},
+                    deletions=("ignored/child.txt",),
+                    ignore=() if skipped else ("ignored/", "!ignored/child.txt"),
+                )
+                if skipped:
+                    manifest = self.read_bundle_manifest(bundle)
+                    manifest["skipped_symlinks"] = ["ignored"]
+                    self.rewrite_bundle(bundle, manifest=manifest)
+                target = self.root / f"ignored-parent-target-{skipped}"
+                with self.assertRaisesRegex(FileSyncConfigError, "protected|ignored"):
+                    apply_sync_bundle(bundle, target, delete=True)
+                self.assertFalse(target.exists())
+
+    def test_pack_does_not_emit_deletions_below_ignored_parents(self) -> None:
+        source = self.root / "ignored-deletion-source"
+        (source / "ignored").mkdir(parents=True)
+        (source / "safe.txt").write_text("safe", encoding="utf-8")
+        bundle = self.root / "ignored-deletion.zip"
+        with mock.patch.object(
+            files_sync_bundle_pack_module,
+            "git_changed_paths",
+            return_value=frozenset(
+                {PurePosixPath("safe.txt"), PurePosixPath("ignored/deleted.txt")}
+            ),
+        ):
+            pack_sync_bundle(
+                source,
+                output_path=bundle,
+                no_config=True,
+                git_changed=True,
+                exclude=("ignored/", "!ignored/deleted.txt"),
+            )
+        self.assertEqual(verify_sync_bundle(bundle).deletions, ())
+
+    def test_nested_sftp_configs_are_excluded_from_sync_and_bundles(self) -> None:
+        self.write_config(
+            '{"host":"example.invalid","ignore":["!**/.vscode/sftp.json"]}'
+        )
+        secret = self.root / "nested" / ".vscode" / "sftp.json"
+        secret.parent.mkdir(parents=True)
+        secret.write_text("nested credentials", encoding="utf-8")
+        visible = self.root / "keep.txt"
+        visible.write_text("keep", encoding="utf-8")
+        for endpoint in (None, "host:/remote"):
+            fake = FakeRemote(snapshot({}))
+            report = sync_workspace_files(
+                self.root,
+                SyncDirection.LOCAL_TO_REMOTE,
+                remote_endpoint=endpoint,
+                remote_factory=lambda _config, fake=fake: fake,
+                dry_run=True,
+            )
+            self.assertNotIn(
+                PurePosixPath("nested/.vscode/sftp.json"),
+                {action.path for action in report.actions},
+            )
+        bundle = self.root / "nested.zip"
+        pack_sync_bundle(self.root, output_path=bundle)
+        manifest = verify_sync_bundle(bundle)
+        self.assertNotIn(
+            PurePosixPath("nested/.vscode/sftp.json"),
+            {entry.path for entry in manifest.entries},
+        )
 
     @staticmethod
     def rewrite_bundle(
@@ -636,7 +770,8 @@ class FileSyncTests(unittest.TestCase):
         config_path.write_bytes(original)
 
         with mock.patch(
-            "hagency_cli.file_sync.os.replace", side_effect=OSError("replace failed")
+            "hagency_cli.files.sync.config.os.replace",
+            side_effect=OSError("replace failed"),
         ):
             with self.assertRaisesRegex(FileSyncError, "cannot write SFTP config"):
                 initialize_sftp_config(self.root, force=True)
@@ -703,7 +838,7 @@ class FileSyncTests(unittest.TestCase):
         self.assertEqual(config.endpoint, "kevin@desktop:2222:D:/Projects/ws")
         self.assertEqual(
             config.ignore_patterns,
-            (".git", "*.tmp", "/.vscode/sftp.json"),
+            (".git", "*.tmp", "**/.vscode/sftp.json"),
         )
         self.assertEqual(config.file_perm, 0o644)
         self.assertEqual(config.dir_perm, 0o750)
@@ -773,7 +908,7 @@ class FileSyncTests(unittest.TestCase):
         self.assertEqual(config.port, 2222)
         self.assertEqual(config.private_key_path, identity)
         self.assertEqual(config.endpoint, "dev@[2001:db8::1]:2222:Projects/ws")
-        self.assertEqual(config.ignore_patterns[-2:], (".git/", "/.vscode/sftp.json"))
+        self.assertEqual(config.ignore_patterns[-2:], (".git", "**/.vscode/sftp.json"))
         self.assertFalse(config.sync_options.delete)
         self.assertTrue(config.sync_options.skip_create)
         self.assertTrue(config.sync_options.update)
@@ -827,7 +962,7 @@ class FileSyncTests(unittest.TestCase):
         self.assertEqual(default.host, "staging.example")
         self.assertEqual(
             default.ignore_patterns,
-            (".git", "*.log", "/.vscode/sftp.json"),
+            (".git", "*.log", "**/.vscode/sftp.json"),
         )
         self.assertEqual(production.selection, "server:prod")
         self.assertEqual(production.host, "prod.example")
@@ -1556,7 +1691,7 @@ class FileSyncTests(unittest.TestCase):
         with (
             mock.patch("paramiko.SSHClient", return_value=client),
             mock.patch(
-                "hagency_cli.file_sync.getpass.getuser", return_value="local-user"
+                "hagency_cli.files.sync.sftp.getpass.getuser", return_value="local-user"
             ),
         ):
             with SFTPRemote(config):
@@ -1778,9 +1913,7 @@ class FileSyncTests(unittest.TestCase):
         fake = FakeRemote(snapshot({}))
         missing_git = FileNotFoundError("git")
 
-        with mock.patch.object(
-            file_sync_module.subprocess, "run", side_effect=missing_git
-        ) as run_mock:
+        with mock.patch.object(subprocess, "run", side_effect=missing_git) as run_mock:
             report = sync_workspace_files(
                 self.root,
                 SyncDirection.LOCAL_TO_REMOTE,
@@ -1791,9 +1924,7 @@ class FileSyncTests(unittest.TestCase):
 
         remote_factory = mock.Mock(side_effect=AssertionError("must not connect"))
         with (
-            mock.patch.object(
-                file_sync_module.subprocess, "run", side_effect=missing_git
-            ),
+            mock.patch.object(subprocess, "run", side_effect=missing_git),
             self.assertRaisesRegex(FileSyncConfigError, "Git is not installed"),
         ):
             sync_workspace_files(
@@ -1812,7 +1943,7 @@ class FileSyncTests(unittest.TestCase):
         remote_factory = mock.Mock(side_effect=AssertionError("must not connect"))
         with (
             mock.patch.object(
-                file_sync_module.subprocess,
+                subprocess,
                 "run",
                 return_value=not_a_repository,
             ),
@@ -1972,7 +2103,7 @@ class FileSyncTests(unittest.TestCase):
         output = source / "portable.zip"
 
         with mock.patch.object(
-            file_sync_module.SFTPRemote,
+            files_sync_sftp_module.SFTPRemote,
             "__enter__",
             side_effect=AssertionError("offline pack must not open SFTP"),
         ):
@@ -2028,7 +2159,7 @@ class FileSyncTests(unittest.TestCase):
         messages: list[str] = []
 
         with mock.patch.object(
-            file_sync_module.SFTPRemote,
+            files_sync_sftp_module.SFTPRemote,
             "__enter__",
             side_effect=AssertionError("offline workflow must not open SFTP"),
         ):
@@ -2092,7 +2223,8 @@ class FileSyncTests(unittest.TestCase):
         self.assertIn(f"would overwrite bundle: {bundle}", dry_messages)
 
         with mock.patch(
-            "hagency_cli.file_sync.os.replace", side_effect=OSError("replace failed")
+            "hagency_cli.files.sync.bundle.apply.os.replace",
+            side_effect=OSError("replace failed"),
         ):
             with self.assertRaisesRegex(FileSyncError, "cannot write sync bundle"):
                 pack_sync_bundle(
@@ -2428,13 +2560,13 @@ class FileSyncTests(unittest.TestCase):
             os.chdir(invocation)
             pack_result = CliRunner().invoke(
                 cli.app,
-                ["sync", "pack", "--root", str(source), "--no-config"],
+                ["file", "pack", "--root", str(source), "--no-config"],
                 prog_name="hgc",
                 catch_exceptions=False,
             )
             apply_result = CliRunner().invoke(
                 cli.app,
-                ["sync", "apply", "hgc-sync.zip"],
+                ["file", "apply", "hgc-sync.zip"],
                 prog_name="hgc",
                 catch_exceptions=False,
             )
@@ -2452,11 +2584,11 @@ class FileSyncTests(unittest.TestCase):
     def test_cli_dispatches_pack_and_apply_without_sync_transport(self) -> None:
         bundle = self.root / "bundle.zip"
         identity = self.root / "not-used"
-        with mock.patch.object(cli, "pack_sync_bundle") as pack_mock:
+        with mock.patch.object(commands_file_module, "pack_sync_bundle") as pack_mock:
             pack_result = CliRunner().invoke(
                 cli.app,
                 [
-                    "sync",
+                    "file",
                     "pack",
                     "--root",
                     str(self.root),
@@ -2488,11 +2620,11 @@ class FileSyncTests(unittest.TestCase):
             progress=print,
         )
 
-        with mock.patch.object(cli, "apply_sync_bundle") as apply_mock:
+        with mock.patch.object(commands_file_module, "apply_sync_bundle") as apply_mock:
             apply_result = CliRunner().invoke(
                 cli.app,
                 [
-                    "sync",
+                    "file",
                     "apply",
                     str(bundle),
                     "--root",
@@ -2521,7 +2653,7 @@ class FileSyncTests(unittest.TestCase):
 
         rejected = CliRunner().invoke(
             cli.app,
-            ["sync", "pack", "server:/srv", "--identity", str(identity)],
+            ["file", "pack", "server:/srv", "--identity", str(identity)],
             prog_name="hgc",
             catch_exceptions=False,
         )
@@ -2540,11 +2672,11 @@ class FileSyncTests(unittest.TestCase):
             os.chdir(self.root)
             invocation_root = Path.cwd()
             with mock.patch.object(
-                cli, "sync_workspace_files", return_value=report
+                commands_file_module, "sync_workspace_files", return_value=report
             ) as sync_mock:
                 result = CliRunner().invoke(
                     cli.app,
-                    ["sync", "both", "--dry-run"],
+                    ["file", "sync", "--dry-run"],
                     prog_name="hgc",
                     catch_exceptions=False,
                 )
@@ -2578,13 +2710,13 @@ class FileSyncTests(unittest.TestCase):
             dry_run=True,
         )
         with mock.patch.object(
-            cli, "sync_workspace_files", return_value=report
+            commands_file_module, "sync_workspace_files", return_value=report
         ) as sync_mock:
             result = CliRunner().invoke(
                 cli.app,
                 [
-                    "sync",
-                    "local-to-remote",
+                    "file",
+                    "push",
                     "--root",
                     str(self.root),
                     "--git-changed",
@@ -2614,7 +2746,7 @@ class FileSyncTests(unittest.TestCase):
 
         rejected = CliRunner().invoke(
             cli.app,
-            ["sync", "both", "--git-changed"],
+            ["file", "sync", "--git-changed"],
             prog_name="hgc",
             catch_exceptions=False,
         )
@@ -2623,8 +2755,8 @@ class FileSyncTests(unittest.TestCase):
 
     def test_cli_short_sync_commands_dispatch_with_matching_options(self) -> None:
         cases = (
-            ("l2r", SyncDirection.LOCAL_TO_REMOTE, ["--git-changed"], True),
-            ("r2l", SyncDirection.REMOTE_TO_LOCAL, [], False),
+            ("push", SyncDirection.LOCAL_TO_REMOTE, ["--git-changed"], True),
+            ("pull", SyncDirection.REMOTE_TO_LOCAL, [], False),
         )
         for command, direction, options, git_changed in cases:
             with self.subTest(command=command):
@@ -2635,12 +2767,12 @@ class FileSyncTests(unittest.TestCase):
                     dry_run=True,
                 )
                 with mock.patch.object(
-                    cli, "sync_workspace_files", return_value=report
+                    commands_file_module, "sync_workspace_files", return_value=report
                 ) as sync_mock:
                     result = CliRunner().invoke(
                         cli.app,
                         [
-                            "sync",
+                            "file",
                             command,
                             "--root",
                             str(self.root),
@@ -2673,7 +2805,7 @@ class FileSyncTests(unittest.TestCase):
         identity = self.root / "id_ed25519"
         cases = (
             (
-                "l2r",
+                "push",
                 SyncDirection.LOCAL_TO_REMOTE,
                 "dev@server:/srv/upload",
                 [
@@ -2703,7 +2835,7 @@ class FileSyncTests(unittest.TestCase):
                 },
             ),
             (
-                "remote-to-local",
+                "pull",
                 SyncDirection.REMOTE_TO_LOCAL,
                 "server:~/restore",
                 ["--delete", "--update"],
@@ -2719,7 +2851,7 @@ class FileSyncTests(unittest.TestCase):
                 },
             ),
             (
-                "both",
+                "sync",
                 SyncDirection.BOTH,
                 "[2001:db8::1]:C:/Projects/ws",
                 ["--skip-create", "--ignore-existing"],
@@ -2745,12 +2877,12 @@ class FileSyncTests(unittest.TestCase):
                     dry_run=True,
                 )
                 with mock.patch.object(
-                    cli, "sync_workspace_files", return_value=report
+                    commands_file_module, "sync_workspace_files", return_value=report
                 ) as sync_mock:
                     result = CliRunner().invoke(
                         cli.app,
                         [
-                            "sync",
+                            "file",
                             command,
                             endpoint,
                             "--root",
@@ -2781,7 +2913,7 @@ class FileSyncTests(unittest.TestCase):
                 )
 
     def test_cli_rejects_temporary_options_without_endpoint(self) -> None:
-        for command in ("local-to-remote", "l2r", "remote-to-local", "r2l", "both"):
+        for command in ("push", "pull", "sync"):
             options = [
                 ["--port", "2222"],
                 ["--identity", "id_ed25519"],
@@ -2789,17 +2921,19 @@ class FileSyncTests(unittest.TestCase):
                 ["--skip-create"],
                 ["--ignore-existing"],
             ]
-            if command != "both":
+            if command != "sync":
                 options.extend((["--delete"], ["--update"]))
             for arguments in options:
                 with (
                     self.subTest(command=command, arguments=arguments),
-                    mock.patch.object(file_sync_module, "load_sftp_config") as loader,
+                    mock.patch.object(
+                        files_sync_operations_module, "load_sftp_config"
+                    ) as loader,
                     mock.patch.object(SFTPRemote, "__enter__") as connect,
                 ):
                     result = CliRunner().invoke(
                         cli.app,
-                        ["sync", command, "--root", str(self.root), *arguments],
+                        ["file", command, "--root", str(self.root), *arguments],
                         prog_name="hgc",
                         catch_exceptions=False,
                     )
@@ -2813,7 +2947,7 @@ class FileSyncTests(unittest.TestCase):
     def test_cli_rejects_profile_with_temporary_endpoint(self) -> None:
         result = CliRunner().invoke(
             cli.app,
-            ["sync", "r2l", "server:/srv", "--profile", "prod"],
+            ["file", "pull", "server:/srv", "--profile", "prod"],
             prog_name="hgc",
             catch_exceptions=False,
         )
@@ -2829,17 +2963,19 @@ class FileSyncTests(unittest.TestCase):
         old_cwd = Path.cwd()
         try:
             os.chdir(self.root)
-            with mock.patch.object(cli, "sync_workspace_files") as sync_mock:
+            with mock.patch.object(
+                commands_file_module, "sync_workspace_files"
+            ) as sync_mock:
                 current_result = CliRunner().invoke(
                     cli.app,
-                    ["sync", "init"],
+                    ["file", "init"],
                     prog_name="hgc",
                     catch_exceptions=False,
                 )
                 selected_result = CliRunner().invoke(
                     cli.app,
                     [
-                        "sync",
+                        "file",
                         "init",
                         "--root",
                         str(selected),

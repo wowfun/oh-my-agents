@@ -4,10 +4,10 @@ import sys
 from collections.abc import Iterable
 from typing import Any
 
-from .purge import PathsEditReport, PurgeReport
+from hagency_cli.files.purge.models import PathsEditReport, PurgeReport
 
 
-def _format_bytes(value: int) -> str:
+def format_bytes(value: int) -> str:
     size = float(max(value, 0))
     units = ("B", "KiB", "MiB", "GiB", "TiB")
     for unit in units:
@@ -40,7 +40,7 @@ def _selected_unknown_count(report: PurgeReport) -> int:
 
 
 def _size_summary(known_bytes: int, unknown_count: int) -> str:
-    summary = f"known size {_format_bytes(known_bytes)}"
+    summary = f"known size {format_bytes(known_bytes)}"
     if unknown_count:
         suffix = "artifact" if unknown_count == 1 else "artifacts"
         summary += f", {unknown_count} {suffix} with unknown size"
@@ -53,7 +53,7 @@ def _render_choices(report: PurgeReport) -> None:
         marker = "[selected]" if choice.exact_path in selected else "[ ]"
         activity = _value(choice.activity).replace("_", " ")
         size = (
-            _format_bytes(choice.size_bytes)
+            format_bytes(choice.size_bytes)
             if choice.size_bytes is not None
             else "size unknown"
         )
@@ -78,7 +78,7 @@ def _render_results(report: PurgeReport) -> None:
     for result in report.results:
         prefix = _result_prefix(result.disposition)
         size = (
-            f" ({_format_bytes(result.size_bytes)})"
+            f" ({format_bytes(result.size_bytes)})"
             if result.size_bytes is not None
             else ""
         )

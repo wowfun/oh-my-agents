@@ -1,50 +1,21 @@
 from __future__ import annotations
 
-import os
 import re
-import shlex
-import subprocess
-import sys
+import tomllib
 from pathlib import Path
 from typing import Any
 
-try:
-    import tomllib
-except ModuleNotFoundError:
-    sys.stderr.write("Error: Python 3.11+ is required for stdlib tomllib.\n")
-    raise SystemExit(1)
-
-
-def die(message: str) -> None:
-    sys.stderr.write(f"Error: {message}\n")
-    raise SystemExit(1)
-
-
-def normalize_windows_shell_path(value: str) -> str:
-    if os.name != "nt":
-        return value
-    match = re.fullmatch(r"/([A-Za-z])(?:/(.*))?", value)
-    if not match:
-        return value
-    drive = match.group(1).upper()
-    rest = match.group(2)
-    if not rest:
-        return f"{drive}:/"
-    return f"{drive}:/{rest}"
-
-
-def expand_path(value: str, base: Path) -> Path:
-    path = Path(os.path.expanduser(normalize_windows_shell_path(value)))
-    if not path.is_absolute():
-        path = base / path
-    return path
+from hagency_cli.workspace.errors import fail
 
 
 def read_toml(path: Path) -> dict:
     if not path.exists():
-        die(f"missing config: {path}")
-    with path.open("rb") as handle:
-        return tomllib.load(handle)
+        fail(f"missing config: {path}")
+    try:
+        with path.open("rb") as handle:
+            return tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        fail(f"cannot read config {path}: {exc}")
 
 
 def write_toml(path: Path, data: dict) -> None:
@@ -64,7 +35,7 @@ def toml_value(value: Any) -> str:
         return "true" if value else "false"
     if isinstance(value, int | float):
         return str(value)
-    die(f"unsupported TOML value type: {type(value).__name__}")
+    fail(f"unsupported TOML value type: {type(value).__name__}")
 
 
 def toml_key_part(value: str) -> str:
@@ -94,7 +65,9 @@ def render_toml(data: dict) -> str:
     top_level = {
         key: value
         for key, value in data.items()
-        if key not in {"defaults", "source", "skill"} and not isinstance(value, dict | list) and value is not None
+        if key not in {"defaults", "source", "skill"}
+        and not isinstance(value, dict | list)
+        and value is not None
     }
     if top_level:
         append_scalar_lines(lines, top_level, ["name", "description"])
@@ -107,7 +80,13 @@ def render_toml(data: dict) -> str:
         append_scalar_lines(
             lines,
             defaults,
-            ["checkout_dir", "checkout_dir_windows", "depth", "remote_name", "remote_ref"],
+            [
+                "checkout_dir",
+                "checkout_dir_windows",
+                "depth",
+                "remote_name",
+                "remote_ref",
+            ],
         )
 
     for name, raw_source in data.get("source", {}).items():
@@ -128,16 +107,3 @@ def render_toml(data: dict) -> str:
         append_scalar_lines(lines, raw_skill, ["include", "exclude"])
 
     return "\n".join(lines).rstrip() + "\n"
-
-
-def run(cmd: list[str], *, cwd: Path | None = None, dry_run: bool = False) -> subprocess.CompletedProcess[str] | None:
-    if cwd:
-        print(f"+ cwd: {cwd}")
-    print("+ cmd: " + " ".join(shlex.quote(part) for part in cmd))
-    if dry_run:
-        return None
-    return subprocess.run(cmd, cwd=cwd, check=True, text=True)
-
-
-def git_ok(cmd: list[str], *, cwd: Path) -> bool:
-    return subprocess.run(cmd, cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0

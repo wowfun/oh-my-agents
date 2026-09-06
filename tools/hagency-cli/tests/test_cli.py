@@ -18,15 +18,21 @@ import tomllib
 
 from typer.testing import CliRunner
 
+import hagency_cli.commands.file as commands_file_module
+import hagency_cli.commands.purge_render as commands_purge_render_module
+import hagency_cli.commands.purge_ui as commands_purge_ui_module
+import hagency_cli.commands.service as commands_service_module
+import hagency_cli.commands.skill_ui as commands_skill_ui_module
+import hagency_cli.files.purge.models as files_purge_models_module
+import hagency_cli.paths as paths_module
+import hagency_cli.workspace.discovery as workspace_discovery_module
+import hagency_cli.workspace.git as workspace_git_module
+import hagency_cli.workspace.operations.sources as workspace_operations_sources_module
+import hagency_cli.workspace.skills as workspace_skills_module
+import hagency_cli.workspace.sources as workspace_sources_module
 from hagency_cli import cli
-from hagency_cli import common as common_module
-from hagency_cli import profile_ui as profile_ui_module
-from hagency_cli import profiles as profile_module
-from hagency_cli import sources as source_module
-from hagency_cli import workspace as workspace_module
-from hagency_cli.space import purge as purge_module
-from hagency_cli.space import questionary_ui as questionary_ui_module
-from hagency_cli.space import render as space_render_module
+from hagency_cli.commands.shared import render_event
+from hagency_cli.workspace.errors import WorkspaceError
 
 
 class CliTests(unittest.TestCase):
@@ -282,18 +288,18 @@ class CliTests(unittest.TestCase):
     def test_short_help_option_is_available_at_every_command_level(self) -> None:
         for args in (
             ("-h",),
-            ("sync", "-h"),
-            ("sync", "init", "-h"),
-            ("sync", "pack", "-h"),
-            ("sync", "apply", "-h"),
-            ("sync", "both", "-h"),
-            ("serve", "-h"),
-            ("serve", "start", "-h"),
-            ("space", "-h"),
-            ("space", "purge", "-h"),
+            ("file", "-h"),
+            ("file", "init", "-h"),
+            ("file", "pack", "-h"),
+            ("file", "apply", "-h"),
+            ("file", "sync", "-h"),
+            ("service", "-h"),
+            ("service", "model-proxy", "start", "-h"),
+            ("file", "-h"),
+            ("file", "purge", "-h"),
             ("source", "-h"),
             ("source", "show", "-h"),
-            ("p", "init", "-h"),
+            ("p", "apply", "-h"),
         ):
             with self.subTest(args=args):
                 stdout, stderr = self.run_cli(*args)
@@ -312,27 +318,29 @@ class CliTests(unittest.TestCase):
         state = mock.Mock(pid=123, host="127.0.0.1", port=9876)
         paths = mock.Mock(log=self.root / "service.log")
         with mock.patch.object(
-            cli, "start_model_proxy", return_value=(state, paths)
+            commands_service_module, "start_model_proxy", return_value=(state, paths)
         ) as start_mock:
             stdout, _stderr = self.run_cli(
-                "serve", "start", "--model-proxy", "--port", "9876"
+                "service", "model-proxy", "start", "--port", "9876"
             )
         start_mock.assert_called_once_with(proxy_config, host="127.0.0.1", port=9876)
         self.assertIn("started model proxy: pid 123", stdout)
 
         state.host = "::1"
-        with mock.patch.object(cli, "start_model_proxy", return_value=(state, paths)):
+        with mock.patch.object(
+            commands_service_module, "start_model_proxy", return_value=(state, paths)
+        ):
             stdout, _stderr = self.run_cli(
-                "serve", "start", "--model-proxy", "--host", "::1"
+                "service", "model-proxy", "start", "--host", "::1"
             )
         self.assertIn("http://[::1]:9876", stdout)
 
         _stdout, stderr = self.run_cli("serve", "start", expected=2)
-        self.assertIn("--model-proxy is required", stderr)
+        self.assertIn("No such command", stderr)
         _stdout, stderr = self.run_cli(
-            "serve",
+            "service",
+            "model-proxy",
             "restart",
-            "--model-proxy",
             "--host",
             "0.0.0.0",
             expected=2,
@@ -341,9 +349,9 @@ class CliTests(unittest.TestCase):
 
     def test_serve_model_proxy_config_and_root_are_mutually_exclusive(self) -> None:
         _stdout, stderr = self.run_cli(
-            "serve",
+            "service",
+            "model-proxy",
             "stop",
-            "--model-proxy",
             "--root",
             str(self.root),
             "--config",
@@ -356,16 +364,16 @@ class CliTests(unittest.TestCase):
         state = mock.Mock(pid=456, host="127.0.0.1", port=8765)
         paths = mock.Mock(log=self.root / "service.log")
         with mock.patch.object(
-            cli, "stop_model_proxy", return_value=(True, paths)
+            commands_service_module, "stop_model_proxy", return_value=(True, paths)
         ) as stop_mock:
-            stdout, _stderr = self.run_cli("serve", "stop", "--model-proxy")
+            stdout, _stderr = self.run_cli("service", "model-proxy", "stop")
         stop_mock.assert_called_once_with(self.root / "hagency-model-proxy.toml")
         self.assertIn("stopped model proxy", stdout)
 
         with mock.patch.object(
-            cli, "restart_model_proxy", return_value=(state, paths)
+            commands_service_module, "restart_model_proxy", return_value=(state, paths)
         ) as restart_mock:
-            stdout, _stderr = self.run_cli("serve", "restart", "--model-proxy")
+            stdout, _stderr = self.run_cli("service", "model-proxy", "restart")
         restart_mock.assert_called_once_with(
             self.root / "hagency-model-proxy.toml",
             host="127.0.0.1",
@@ -380,33 +388,31 @@ class CliTests(unittest.TestCase):
             values,
             [
                 "init",
-                "sync",
                 "source",
                 "s",
                 "skill",
                 "profile",
                 "p",
-                "serve",
-                "space",
+                "file",
+                "service",
             ],
         )
 
-        values, _stderr = self.complete_bash("hgc sync ", 2)
+        values, _stderr = self.complete_bash("hgc file ", 2)
         self.assertEqual(
             values,
             [
-                "local-to-remote",
-                "l2r",
-                "remote-to-local",
-                "r2l",
-                "both",
+                "push",
+                "pull",
+                "sync",
                 "init",
                 "pack",
                 "apply",
+                "purge",
             ],
         )
 
-        values, _stderr = self.complete_bash("hgc sync both --", 3)
+        values, _stderr = self.complete_bash("hgc file sync --", 3)
         self.assertIn("--profile", values)
         self.assertIn("--dry-run", values)
         self.assertIn("--port", values)
@@ -419,26 +425,26 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("--delete", values)
         self.assertNotIn("--update", values)
 
-        values, _stderr = self.complete_bash("hgc sync local-to-remote --", 3)
+        values, _stderr = self.complete_bash("hgc file push --", 3)
         self.assertIn("--git-changed", values)
         self.assertIn("--delete", values)
         self.assertIn("--update", values)
 
-        values, _stderr = self.complete_bash("hgc sync l2r --", 3)
+        values, _stderr = self.complete_bash("hgc file push --", 3)
         self.assertIn("--git-changed", values)
 
-        values, _stderr = self.complete_bash("hgc sync r2l --", 3)
+        values, _stderr = self.complete_bash("hgc file pull --", 3)
         self.assertNotIn("--git-changed", values)
         self.assertIn("--delete", values)
         self.assertIn("--update", values)
 
-        values, _stderr = self.complete_bash("hgc sync init --", 3)
+        values, _stderr = self.complete_bash("hgc file init --", 3)
         self.assertIn("--root", values)
         self.assertIn("--force", values)
         self.assertIn("--dry-run", values)
         self.assertNotIn("--profile", values)
 
-        values, _stderr = self.complete_bash("hgc sync pack --", 3)
+        values, _stderr = self.complete_bash("hgc file pack --", 3)
         for option in (
             "--root",
             "--profile",
@@ -454,7 +460,7 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("--port", values)
         self.assertNotIn("--identity", values)
 
-        values, _stderr = self.complete_bash("hgc sync apply --", 3)
+        values, _stderr = self.complete_bash("hgc file apply --", 3)
         for option in (
             "--root",
             "--delete",
@@ -469,13 +475,15 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("--git-changed", values)
         self.assertNotIn("--force", values)
 
-        values, _stderr = self.complete_bash("hgc serve ", 2)
+        values, _stderr = self.complete_bash("hgc service model-proxy ", 3)
         self.assertEqual(values, ["start", "stop", "restart"])
 
-        values, _stderr = self.complete_bash("hgc space ", 2)
-        self.assertEqual(values, ["purge"])
+        values, _stderr = self.complete_bash("hgc file ", 2)
+        self.assertEqual(
+            values, ["push", "pull", "sync", "init", "pack", "apply", "purge"]
+        )
 
-        values, _stderr = self.complete_bash("hgc space purge --", 3)
+        values, _stderr = self.complete_bash("hgc file purge --", 3)
         self.assertIn("--dry-run", values)
         self.assertIn("--paths", values)
 
@@ -488,17 +496,17 @@ class CliTests(unittest.TestCase):
         self.assertIn("--checkout-dir", values)
 
     def test_space_purge_help_and_argument_constraints(self) -> None:
-        stdout, stderr = self.run_cli("space", "purge", "--help")
+        stdout, stderr = self.run_cli("file", "purge", "--help")
         self.assertEqual(stderr, "")
         self.assertIn("PATH", stdout)
         self.assertIn("--dry-run", stdout)
         self.assertIn("--paths", stdout)
 
-        _stdout, stderr = self.run_cli("space", "purge", ".", "--paths", expected=2)
+        _stdout, stderr = self.run_cli("file", "purge", ".", "--paths", expected=2)
         self.assertIn("--paths cannot be combined", stderr)
 
         _stdout, stderr = self.run_cli(
-            "space", "purge", "--dry-run", "--paths", expected=2
+            "file", "purge", "--dry-run", "--paths", expected=2
         )
         self.assertIn("--paths cannot be combined", stderr)
 
@@ -524,12 +532,16 @@ class CliTests(unittest.TestCase):
         ui = mock.sentinel.purge_ui
         with (
             mock.patch.object(
-                questionary_ui_module, "QuestionaryPurgeUI", return_value=ui
+                commands_purge_ui_module, "QuestionaryPurgeUI", return_value=ui
             ),
-            mock.patch.object(cli, "purge_space", return_value=report) as purge_mock,
-            mock.patch.object(cli, "render_purge_report") as render_mock,
+            mock.patch.object(
+                commands_file_module, "purge_space", return_value=report
+            ) as purge_mock,
+            mock.patch.object(
+                commands_file_module, "render_purge_report"
+            ) as render_mock,
         ):
-            self.run_cli("space", "purge", ".", "nested/..", "--dry-run")
+            self.run_cli("file", "purge", ".", "nested/..", "--dry-run")
 
         request = purge_mock.call_args.args[0]
         self.assertEqual(request.paths, (self.root.resolve(), self.root.resolve()))
@@ -545,13 +557,13 @@ class CliTests(unittest.TestCase):
             self.skipTest(f"could not create symlink: {exc}")
 
         with (
-            mock.patch.object(questionary_ui_module, "QuestionaryPurgeUI"),
+            mock.patch.object(commands_purge_ui_module, "QuestionaryPurgeUI"),
             mock.patch.object(
-                cli, "purge_space", return_value=mock.Mock(exit_code=0)
+                commands_file_module, "purge_space", return_value=mock.Mock(exit_code=0)
             ) as purge_mock,
-            mock.patch.object(cli, "render_purge_report"),
+            mock.patch.object(commands_file_module, "render_purge_report"),
         ):
-            self.run_cli("space", "purge", "scan-link")
+            self.run_cli("file", "purge", "scan-link")
 
         request = purge_mock.call_args.args[0]
         self.assertEqual(request.paths, (scan_link.absolute(),))
@@ -563,16 +575,16 @@ class CliTests(unittest.TestCase):
         checkbox_prompt = mock.Mock()
         checkbox_prompt.unsafe_ask.return_value = ["choice-id"]
         with mock.patch.object(
-            questionary_ui_module.questionary,
+            commands_purge_ui_module.questionary,
             "checkbox",
             return_value=checkbox_prompt,
         ) as checkbox_mock:
-            selected = questionary_ui_module.QuestionaryPurgeUI().select((choice,))
+            selected = commands_purge_ui_module.QuestionaryPurgeUI().select((choice,))
 
         self.assertEqual(selected, ("choice-id",))
         checkbox_choices = checkbox_mock.call_args.kwargs["choices"]
         self.assertIsInstance(
-            checkbox_choices[0], questionary_ui_module.questionary.Separator
+            checkbox_choices[0], commands_purge_ui_module.questionary.Separator
         )
         self.assertEqual(checkbox_choices[0].title, str(choice.project_path))
         checkbox_choice = checkbox_choices[1]
@@ -587,13 +599,13 @@ class CliTests(unittest.TestCase):
         output = io.StringIO()
         with (
             mock.patch.object(
-                questionary_ui_module.questionary,
+                commands_purge_ui_module.questionary,
                 "confirm",
                 return_value=confirm_prompt,
             ) as confirm_mock,
             contextlib.redirect_stdout(output),
         ):
-            confirmed = questionary_ui_module.QuestionaryPurgeUI().confirm_exact(
+            confirmed = commands_purge_ui_module.QuestionaryPurgeUI().confirm_exact(
                 (exact_path,), 1024
             )
 
@@ -608,39 +620,39 @@ class CliTests(unittest.TestCase):
         selected_path = self.root / "old-project" / "node_modules"
         recent_path = self.root / "active-project" / "target"
         choices = (
-            purge_module.PurgeChoice(
+            files_purge_models_module.PurgeChoice(
                 id="old",
                 exact_path=selected_path,
                 project_path=selected_path.parent,
                 artifact_kind="node_modules",
                 size_bytes=1024,
-                activity=purge_module.Activity.OLD,
+                activity=files_purge_models_module.Activity.OLD,
                 preselected=True,
             ),
-            purge_module.PurgeChoice(
+            files_purge_models_module.PurgeChoice(
                 id="recent",
                 exact_path=recent_path,
                 project_path=recent_path.parent,
                 artifact_kind="target",
                 size_bytes=None,
-                activity=purge_module.Activity.RECENT,
+                activity=files_purge_models_module.Activity.RECENT,
                 preselected=False,
             ),
         )
-        preview = purge_module.PurgeReport(
-            disposition=purge_module.PurgeDisposition.PREVIEW,
+        preview = files_purge_models_module.PurgeReport(
+            disposition=files_purge_models_module.PurgeDisposition.PREVIEW,
             roots=(self.root,),
             choices=choices,
             selected_paths=(selected_path,),
             results=(
-                purge_module.PurgeItemResult(
+                files_purge_models_module.PurgeItemResult(
                     exact_path=selected_path,
-                    disposition=purge_module.ItemDisposition.WOULD_REMOVE,
+                    disposition=files_purge_models_module.ItemDisposition.WOULD_REMOVE,
                     size_bytes=1024,
                 ),
             ),
             issues=(
-                purge_module.PurgeIssue(
+                files_purge_models_module.PurgeIssue(
                     "scan_notice",
                     self.root,
                     "one directory was unreadable",
@@ -655,7 +667,7 @@ class CliTests(unittest.TestCase):
             contextlib.redirect_stdout(stdout),
             contextlib.redirect_stderr(stderr),
         ):
-            space_render_module.render_purge_report(preview)
+            commands_purge_render_module.render_purge_report(preview)
 
         rendered = stdout.getvalue()
         self.assertIn(
@@ -666,7 +678,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("Preview complete: 1 artifact(s), known size 1.0 KiB.", rendered)
         self.assertIn("Warning [scan_notice]", stderr.getvalue())
 
-        edit_report = purge_module.PathsEditReport(
+        edit_report = files_purge_models_module.PathsEditReport(
             config_path=self.root / "space-purge-paths",
             before_roots=(self.root / "before",),
             after_roots=(self.root / "after",),
@@ -675,7 +687,7 @@ class CliTests(unittest.TestCase):
         )
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
-            space_render_module.render_paths_edit_report(edit_report)
+            commands_purge_render_module.render_paths_edit_report(edit_report)
         rendered = stdout.getvalue()
         self.assertIn("Before:\n", rendered)
         self.assertIn(str(self.root / "before"), rendered)
@@ -686,36 +698,44 @@ class CliTests(unittest.TestCase):
         paths_report = mock.Mock(exit_code=0)
         with (
             mock.patch.object(
-                cli, "edit_purge_paths", return_value=paths_report
+                commands_file_module, "edit_purge_paths", return_value=paths_report
             ) as edit_mock,
-            mock.patch.object(cli, "render_paths_edit_report") as render_mock,
+            mock.patch.object(
+                commands_file_module, "render_paths_edit_report"
+            ) as render_mock,
         ):
-            self.run_cli("space", "purge", "--paths")
+            self.run_cli("file", "purge", "--paths")
         edit_mock.assert_called_once_with()
         render_mock.assert_called_once_with(paths_report)
 
         failed_paths_report = mock.Mock(exit_code=5)
         with (
             mock.patch.object(
-                cli, "edit_purge_paths", return_value=failed_paths_report
+                commands_file_module,
+                "edit_purge_paths",
+                return_value=failed_paths_report,
             ),
-            mock.patch.object(cli, "render_paths_edit_report"),
+            mock.patch.object(commands_file_module, "render_paths_edit_report"),
         ):
-            self.run_cli("space", "purge", "--paths", expected=5)
+            self.run_cli("file", "purge", "--paths", expected=5)
 
         purge_report = mock.Mock(exit_code=7)
         with (
-            mock.patch.object(questionary_ui_module, "QuestionaryPurgeUI"),
-            mock.patch.object(cli, "purge_space", return_value=purge_report),
-            mock.patch.object(cli, "render_purge_report"),
+            mock.patch.object(commands_purge_ui_module, "QuestionaryPurgeUI"),
+            mock.patch.object(
+                commands_file_module, "purge_space", return_value=purge_report
+            ),
+            mock.patch.object(commands_file_module, "render_purge_report"),
         ):
-            self.run_cli("space", "purge", expected=7)
+            self.run_cli("file", "purge", expected=7)
 
         with (
-            mock.patch.object(questionary_ui_module, "QuestionaryPurgeUI"),
-            mock.patch.object(cli, "purge_space", side_effect=KeyboardInterrupt),
+            mock.patch.object(commands_purge_ui_module, "QuestionaryPurgeUI"),
+            mock.patch.object(
+                commands_file_module, "purge_space", side_effect=KeyboardInterrupt
+            ),
         ):
-            self.run_cli("space", "purge", expected=130)
+            self.run_cli("file", "purge", expected=130)
 
     def test_bash_completion_includes_workspace_catalog_values(self) -> None:
         values, _stderr = self.complete_bash("hgc source show ", 3)
@@ -906,26 +926,44 @@ class CliTests(unittest.TestCase):
         explicit.mkdir()
         (explicit / "hagency-config.toml").write_text("", encoding="utf-8")
         installed_module = (
-            self.root / "tools" / "hagency-cli" / "src" / "hagency_cli" / "workspace.py"
+            self.root
+            / "tools"
+            / "hagency-cli"
+            / "src"
+            / "hagency_cli"
+            / "workspace"
+            / "discovery.py"
         )
 
-        with mock.patch.object(workspace_module, "__file__", str(installed_module)):
+        with mock.patch.object(
+            workspace_discovery_module, "__file__", str(installed_module)
+        ):
             self.assertEqual(
-                workspace_module.resolve_workspace_root(str(explicit), nested),
+                workspace_discovery_module.resolve_workspace_root(
+                    str(explicit), nested
+                ),
                 explicit.resolve(),
             )
             self.assertEqual(
-                workspace_module.resolve_workspace_root(None, nested),
+                workspace_discovery_module.resolve_workspace_root(None, nested),
                 current.resolve(),
             )
 
     def test_workspace_resolution_falls_back_to_installed_source(self) -> None:
         installed_module = (
-            self.root / "tools" / "hagency-cli" / "src" / "hagency_cli" / "workspace.py"
+            self.root
+            / "tools"
+            / "hagency-cli"
+            / "src"
+            / "hagency_cli"
+            / "workspace"
+            / "discovery.py"
         )
         with tempfile.TemporaryDirectory() as outside_value:
             outside = Path(outside_value)
-            with mock.patch.object(workspace_module, "__file__", str(installed_module)):
+            with mock.patch.object(
+                workspace_discovery_module, "__file__", str(installed_module)
+            ):
                 stdout, _stderr = self.run_cli("source", "list", cwd=outside)
                 values, completion_stderr = self.complete_bash(
                     "hgc source show ", 3, cwd=outside
@@ -942,9 +980,15 @@ class CliTests(unittest.TestCase):
         ):
             outside = Path(outside_value)
             installed_module = (
-                Path(installed_value) / "site-packages" / "hagency_cli" / "workspace.py"
+                Path(installed_value)
+                / "site-packages"
+                / "hagency_cli"
+                / "workspace"
+                / "discovery.py"
             )
-            with mock.patch.object(workspace_module, "__file__", str(installed_module)):
+            with mock.patch.object(
+                workspace_discovery_module, "__file__", str(installed_module)
+            ):
                 _stdout, stderr = self.run_cli(
                     "source", "list", cwd=outside, expected=1
                 )
@@ -963,7 +1007,9 @@ class CliTests(unittest.TestCase):
                 with (
                     self.subTest(module_path=module_path),
                     mock.patch.object(
-                        workspace_module, "__file__", str(self.root / module_path)
+                        workspace_discovery_module,
+                        "__file__",
+                        str(self.root / module_path),
                     ),
                 ):
                     _stdout, stderr = self.run_cli(
@@ -975,11 +1021,19 @@ class CliTests(unittest.TestCase):
         checkout = self.root / "checkout"
         (checkout / "hagency-config.toml").mkdir(parents=True)
         installed_module = (
-            checkout / "tools" / "hagency-cli" / "src" / "hagency_cli" / "workspace.py"
+            checkout
+            / "tools"
+            / "hagency-cli"
+            / "src"
+            / "hagency_cli"
+            / "workspace"
+            / "discovery.py"
         )
         with (
             tempfile.TemporaryDirectory() as outside_value,
-            mock.patch.object(workspace_module, "__file__", str(installed_module)),
+            mock.patch.object(
+                workspace_discovery_module, "__file__", str(installed_module)
+            ),
         ):
             _stdout, stderr = self.run_cli(
                 "source", "list", cwd=Path(outside_value), expected=1
@@ -988,12 +1042,20 @@ class CliTests(unittest.TestCase):
 
     def test_init_does_not_fall_back_to_installed_source(self) -> None:
         installed_module = (
-            self.root / "tools" / "hagency-cli" / "src" / "hagency_cli" / "workspace.py"
+            self.root
+            / "tools"
+            / "hagency-cli"
+            / "src"
+            / "hagency_cli"
+            / "workspace"
+            / "discovery.py"
         )
         original_config = self.config_path.read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory() as outside_value:
             outside = Path(outside_value)
-            with mock.patch.object(workspace_module, "__file__", str(installed_module)):
+            with mock.patch.object(
+                workspace_discovery_module, "__file__", str(installed_module)
+            ):
                 stdout, _stderr = self.run_cli("init", cwd=outside)
 
             self.assertTrue((outside / "hagency-config.toml").is_file())
@@ -1002,23 +1064,23 @@ class CliTests(unittest.TestCase):
         self.assertEqual(self.config_path.read_text(encoding="utf-8"), original_config)
 
     def test_windows_git_bash_path_normalization(self) -> None:
-        with mock.patch.object(common_module.os, "name", "nt"):
+        with mock.patch.object(paths_module.os, "name", "nt"):
             self.assertEqual(
-                common_module.normalize_windows_shell_path("/c/Users/me/project"),
+                paths_module.normalize_windows_shell_path("/c/Users/me/project"),
                 "C:/Users/me/project",
             )
-            self.assertEqual(common_module.normalize_windows_shell_path("/d"), "D:/")
+            self.assertEqual(paths_module.normalize_windows_shell_path("/d"), "D:/")
             self.assertEqual(
-                common_module.normalize_windows_shell_path("/d/Projects/references"),
+                paths_module.normalize_windows_shell_path("/d/Projects/references"),
                 "D:/Projects/references",
             )
             self.assertEqual(
-                common_module.normalize_windows_shell_path(r"C:\Users\me\project"),
+                paths_module.normalize_windows_shell_path(r"C:\Users\me\project"),
                 r"C:\Users\me\project",
             )
 
         self.assertEqual(
-            common_module.normalize_windows_shell_path("/c/Users/me/project"),
+            paths_module.normalize_windows_shell_path("/c/Users/me/project"),
             "/c/Users/me/project",
         )
 
@@ -1029,13 +1091,13 @@ class CliTests(unittest.TestCase):
         }
 
         self.assertEqual(
-            source_module.configured_checkout_dir(
+            workspace_sources_module.configured_checkout_dir(
                 defaults, checkout_override=None, windows=True
             ),
             "/d/Projects/references",
         )
         self.assertEqual(
-            source_module.configured_checkout_dir(
+            workspace_sources_module.configured_checkout_dir(
                 defaults, checkout_override=None, windows=False
             ),
             "~/Projects/references",
@@ -1052,7 +1114,7 @@ class CliTests(unittest.TestCase):
         for defaults in cases:
             with self.subTest(defaults=defaults):
                 self.assertEqual(
-                    source_module.configured_checkout_dir(
+                    workspace_sources_module.configured_checkout_dir(
                         defaults, checkout_override=None, windows=True
                     ),
                     "~/Projects/references",
@@ -1064,7 +1126,7 @@ class CliTests(unittest.TestCase):
             "checkout_dir_windows": "/d/Projects/references",
         }
         self.assertEqual(
-            source_module.configured_checkout_dir(
+            workspace_sources_module.configured_checkout_dir(
                 defaults,
                 checkout_override="cli-checkouts",
                 windows=True,
@@ -1115,7 +1177,9 @@ class CliTests(unittest.TestCase):
         stdout = io.StringIO()
 
         with contextlib.redirect_stdout(stdout):
-            result = common_module.run(["git", "status"], cwd=self.root, dry_run=True)
+            result = workspace_git_module.run(
+                ["git", "status"], cwd=self.root, dry_run=True, progress=render_event
+            )
 
         output = stdout.getvalue()
         self.assertIsNone(result)
@@ -1267,7 +1331,9 @@ class CliTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        with mock.patch.object(cli, "sync_source") as sync_mock:
+        with mock.patch.object(
+            workspace_operations_sources_module, "sync_source"
+        ) as sync_mock:
             stdout, _stderr = self.run_cli(
                 "source",
                 "add",
@@ -1737,21 +1803,34 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("reanchor source", stdout)
 
     def test_source_slice_parsing_valid_values(self) -> None:
-        self.assertEqual(cli.parse_source_slice("4:", 5), [4, 5])
-        self.assertEqual(cli.parse_source_slice("2:4", 5), [2, 3, 4])
-        self.assertEqual(cli.parse_source_slice(":3", 5), [1, 2, 3])
-        self.assertEqual(cli.parse_source_slice("4", 5), [4])
-        self.assertEqual(cli.parse_source_slice("1,3", 5), [1, 3])
-        self.assertEqual(cli.parse_source_slice("1,3:", 5), [1, 3, 4, 5])
+        self.assertEqual(
+            workspace_operations_sources_module.parse_source_slice("4:", 5), [4, 5]
+        )
+        self.assertEqual(
+            workspace_operations_sources_module.parse_source_slice("2:4", 5), [2, 3, 4]
+        )
+        self.assertEqual(
+            workspace_operations_sources_module.parse_source_slice(":3", 5), [1, 2, 3]
+        )
+        self.assertEqual(
+            workspace_operations_sources_module.parse_source_slice("4", 5), [4]
+        )
+        self.assertEqual(
+            workspace_operations_sources_module.parse_source_slice("1,3", 5), [1, 3]
+        )
+        self.assertEqual(
+            workspace_operations_sources_module.parse_source_slice("1,3:", 5),
+            [1, 3, 4, 5],
+        )
 
     def test_source_slice_parsing_invalid_values(self) -> None:
         for value in ["0", "-1", "4:2", "abc", "1:2:3", "6", "1,,3", ",1", "1,"]:
             with (
                 self.subTest(value=value),
                 contextlib.redirect_stderr(io.StringIO()),
-                self.assertRaises(SystemExit),
+                self.assertRaises(WorkspaceError),
             ):
-                cli.parse_source_slice(value, 5)
+                workspace_operations_sources_module.parse_source_slice(value, 5)
 
     def test_source_sync_slice_dry_run_uses_original_indexes(self) -> None:
         self.append_local_source("second-source")
@@ -1816,12 +1895,19 @@ class CliTests(unittest.TestCase):
         self.append_local_source("third-source")
 
         def fake_sync(
-            source, *, dry_run: bool, depth: int | None = None, reanchor: bool = False
+            source,
+            *,
+            dry_run: bool,
+            depth: int | None = None,
+            reanchor: bool = False,
+            progress=None,
         ) -> None:
             if source.name == "second-source":
                 raise subprocess.CalledProcessError(128, ["git", "fetch", "origin"])
 
-        with mock.patch.object(cli, "sync_source", side_effect=fake_sync):
+        with mock.patch.object(
+            workspace_operations_sources_module, "sync_source", side_effect=fake_sync
+        ):
             stdout, stderr = self.run_cli("source", "sync", expected=1)
 
         self.assertIn("sync source [1/3] local-source", stdout)
@@ -1835,10 +1921,10 @@ class CliTests(unittest.TestCase):
     def test_git_fetch_uses_hardcoded_retries(self) -> None:
         source_path = self.root / "checkout"
         source_path.mkdir()
-        source = source_module.Source(
+        source = workspace_sources_module.Source(
             name="remote-source",
             path=source_path,
-            remote=source_module.Remote(
+            remote=workspace_sources_module.Remote(
                 name="origin",
                 url="https://example.invalid/acme/ExamplePack.git",
                 ref="main",
@@ -1849,22 +1935,24 @@ class CliTests(unittest.TestCase):
         )
         calls: list[list[str]] = []
 
-        def fail_run(cmd, *, cwd=None, dry_run: bool = False):
+        def fail_run(cmd, *, cwd=None, dry_run: bool = False, progress=None):
             calls.append(cmd)
             raise subprocess.CalledProcessError(128, cmd)
 
         stdout = io.StringIO()
         with (
-            mock.patch.object(source_module, "git_ok", return_value=True),
+            mock.patch.object(workspace_sources_module, "git_ok", return_value=True),
             mock.patch.object(
-                source_module.subprocess, "run", return_value=current_remote
+                workspace_sources_module.subprocess, "run", return_value=current_remote
             ),
-            mock.patch.object(source_module, "run", side_effect=fail_run),
-            mock.patch.object(source_module.time, "sleep"),
+            mock.patch.object(workspace_sources_module, "run", side_effect=fail_run),
+            mock.patch.object(workspace_sources_module.time, "sleep"),
             contextlib.redirect_stdout(stdout),
             self.assertRaises(subprocess.CalledProcessError),
         ):
-            source_module.sync_source(source, dry_run=False, depth=1)
+            workspace_sources_module.sync_source(
+                source, dry_run=False, depth=1, progress=render_event
+            )
 
         fetch_calls = [cmd for cmd in calls if cmd[:2] == ["git", "fetch"]]
         self.assertEqual(len(fetch_calls), 4)
@@ -1872,10 +1960,10 @@ class CliTests(unittest.TestCase):
         self.assertIn("retry 3/3 after git fetch failed", stdout.getvalue())
 
     def test_git_clone_uses_hardcoded_retries(self) -> None:
-        source = source_module.Source(
+        source = workspace_sources_module.Source(
             name="remote-source",
             path=self.root / "checkout",
-            remote=source_module.Remote(
+            remote=workspace_sources_module.Remote(
                 name="origin",
                 url="https://example.invalid/acme/ExamplePack.git",
                 ref="main",
@@ -1883,18 +1971,20 @@ class CliTests(unittest.TestCase):
         )
         calls: list[list[str]] = []
 
-        def fail_run(cmd, *, cwd=None, dry_run: bool = False):
+        def fail_run(cmd, *, cwd=None, dry_run: bool = False, progress=None):
             calls.append(cmd)
             raise subprocess.CalledProcessError(128, cmd)
 
         stdout = io.StringIO()
         with (
-            mock.patch.object(source_module, "run", side_effect=fail_run),
-            mock.patch.object(source_module.time, "sleep"),
+            mock.patch.object(workspace_sources_module, "run", side_effect=fail_run),
+            mock.patch.object(workspace_sources_module.time, "sleep"),
             contextlib.redirect_stdout(stdout),
             self.assertRaises(subprocess.CalledProcessError),
         ):
-            source_module.sync_source(source, dry_run=False, depth=1)
+            workspace_sources_module.sync_source(
+                source, dry_run=False, depth=1, progress=render_event
+            )
 
         clone_calls = [cmd for cmd in calls if cmd[:2] == ["git", "clone"]]
         self.assertEqual(len(clone_calls), 4)
@@ -1903,10 +1993,10 @@ class CliTests(unittest.TestCase):
     def test_sync_source_existing_checkout_uses_depth_on_fetch(self) -> None:
         source_path = self.root / "checkout"
         source_path.mkdir()
-        source = source_module.Source(
+        source = workspace_sources_module.Source(
             name="remote-source",
             path=source_path,
-            remote=source_module.Remote(
+            remote=workspace_sources_module.Remote(
                 name="origin",
                 url="https://example.invalid/acme/ExamplePack.git",
                 ref="main",
@@ -1916,13 +2006,15 @@ class CliTests(unittest.TestCase):
 
         stdout = io.StringIO()
         with (
-            mock.patch.object(source_module, "git_ok", return_value=True),
+            mock.patch.object(workspace_sources_module, "git_ok", return_value=True),
             mock.patch.object(
-                source_module.subprocess, "run", return_value=missing_remote
+                workspace_sources_module.subprocess, "run", return_value=missing_remote
             ),
             contextlib.redirect_stdout(stdout),
         ):
-            source_module.sync_source(source, dry_run=True, depth=1)
+            workspace_sources_module.sync_source(
+                source, dry_run=True, depth=1, progress=render_event
+            )
 
         self.assertIn("git fetch --depth 1 origin", stdout.getvalue())
 
@@ -2441,7 +2533,7 @@ class CliTests(unittest.TestCase):
         )
         target = self.root / "target"
 
-        stdout, _stderr = self.run_cli("profile", "init", "-d", str(target), "content")
+        stdout, _stderr = self.run_cli("profile", "apply", "-d", str(target), "content")
         self.assertIn("local-one", stdout)
         self.assertIn("external-one", stdout)
         self.assertTrue((target / ".agents" / "skills" / "local-one").is_symlink())
@@ -2462,7 +2554,7 @@ class CliTests(unittest.TestCase):
         )
         skills_dir = self.root / "custom" / "skills"
 
-        self.run_cli("profile", "init", "--path", str(skills_dir), "content")
+        self.run_cli("profile", "apply", "--path", str(skills_dir), "content")
 
         destination = skills_dir / "external-one"
         self.assertTrue(destination.is_symlink())
@@ -2492,7 +2584,7 @@ class CliTests(unittest.TestCase):
 
         self.run_cli(
             "profile",
-            "init",
+            "apply",
             "--path",
             "shared/skills",
             "content",
@@ -2525,7 +2617,7 @@ class CliTests(unittest.TestCase):
 
         self.run_cli(
             "profile",
-            "init",
+            "apply",
             "--dir",
             "project",
             "content",
@@ -2539,7 +2631,7 @@ class CliTests(unittest.TestCase):
         self.assertFalse((self.root / "project").exists())
 
     def test_profile_init_requires_a_destination(self) -> None:
-        _stdout, stderr = self.run_cli("profile", "init", "content", expected=2)
+        _stdout, stderr = self.run_cli("profile", "apply", "content", expected=2)
 
         self.assertIn("one of the options is required", stderr)
         self.assertIn("--path", stderr)
@@ -2548,7 +2640,7 @@ class CliTests(unittest.TestCase):
     def test_profile_init_rejects_path_and_dir_together(self) -> None:
         _stdout, stderr = self.run_cli(
             "profile",
-            "init",
+            "apply",
             "--path",
             str(self.root / "skills"),
             "--dir",
@@ -2563,7 +2655,7 @@ class CliTests(unittest.TestCase):
         destination = self.root / "not-a-directory"
         destination.write_text("keep\n", encoding="utf-8")
         commands = (
-            ("profile", "init", "--path", str(destination), "content"),
+            ("profile", "apply", "--path", str(destination), "content"),
             ("skill", "add", "external-one", "--path", str(destination)),
         )
 
@@ -2598,7 +2690,7 @@ class CliTests(unittest.TestCase):
         destination = self.root / "broken-skills"
         destination.symlink_to(self.root / "missing-skills", target_is_directory=True)
         commands = (
-            ("profile", "init", "--path", str(destination), "content"),
+            ("profile", "apply", "--path", str(destination), "content"),
             ("skill", "add", "external-one", "--path", str(destination)),
         )
 
@@ -2628,7 +2720,7 @@ class CliTests(unittest.TestCase):
         skills_dir = self.root / "target" / "skills"
 
         stdout, _stderr = self.run_cli(
-            "profile", "init", "-p", str(skills_dir), "content", "-cp"
+            "profile", "apply", "-p", str(skills_dir), "content", "-cp"
         )
 
         copied = skills_dir / "external-one"
@@ -2657,7 +2749,7 @@ class CliTests(unittest.TestCase):
         target = self.root / "target"
 
         stdout, _stderr = self.run_cli(
-            "profile", "init", "-d", str(target), "content", "--dry-run"
+            "profile", "apply", "-d", str(target), "content", "--dry-run"
         )
 
         self.assertIn("link", stdout)
@@ -2683,7 +2775,7 @@ class CliTests(unittest.TestCase):
 
         stdout, _stderr = self.run_cli(
             "profile",
-            "init",
+            "apply",
             "-d",
             str(target),
             "content",
@@ -2712,15 +2804,17 @@ class CliTests(unittest.TestCase):
         skills_dir = self.root / "target" / "skills"
 
         with (
-            mock.patch.object(profile_module, "is_windows_platform", return_value=True),
             mock.patch.object(
-                profile_module.subprocess,
+                workspace_skills_module, "is_windows_platform", return_value=True
+            ),
+            mock.patch.object(
+                workspace_skills_module.subprocess,
                 "run",
                 return_value=subprocess.CompletedProcess(["powershell"], 0),
             ) as run,
         ):
             stdout, _stderr = self.run_cli(
-                "profile", "init", "-p", str(skills_dir), "content"
+                "profile", "apply", "-p", str(skills_dir), "content"
             )
 
         self.assertIn("junction", stdout)
@@ -2748,19 +2842,23 @@ class CliTests(unittest.TestCase):
 
         with (
             mock.patch.dict(
-                profile_module.os.environ, {"HAGENCY_TEST_SENTINEL": "kept"}, clear=True
+                workspace_skills_module.os.environ,
+                {"HAGENCY_TEST_SENTINEL": "kept"},
+                clear=True,
             ),
             mock.patch.object(
-                profile_module.subprocess,
+                workspace_skills_module.subprocess,
                 "run",
                 return_value=subprocess.CompletedProcess(["powershell"], 0),
             ) as run,
         ):
-            profile_module.create_windows_junction(link, target)
+            workspace_skills_module.create_windows_junction(link, target)
 
-            self.assertNotIn("HAGENCY_PROFILE_JUNCTION_LINK", profile_module.os.environ)
             self.assertNotIn(
-                "HAGENCY_PROFILE_JUNCTION_TARGET", profile_module.os.environ
+                "HAGENCY_PROFILE_JUNCTION_LINK", workspace_skills_module.os.environ
+            )
+            self.assertNotIn(
+                "HAGENCY_PROFILE_JUNCTION_TARGET", workspace_skills_module.os.environ
             )
 
         run.assert_called_once()
@@ -2796,11 +2894,13 @@ class CliTests(unittest.TestCase):
         target = self.root / "target"
 
         with (
-            mock.patch.object(profile_module, "is_windows_platform", return_value=True),
-            mock.patch.object(profile_module.subprocess, "run") as run,
+            mock.patch.object(
+                workspace_skills_module, "is_windows_platform", return_value=True
+            ),
+            mock.patch.object(workspace_skills_module.subprocess, "run") as run,
         ):
             stdout, _stderr = self.run_cli(
-                "profile", "init", "-d", str(target), "content", "--dry-run"
+                "profile", "apply", "-d", str(target), "content", "--dry-run"
             )
 
         self.assertIn("junction", stdout)
@@ -2822,11 +2922,11 @@ class CliTests(unittest.TestCase):
         )
 
         with mock.patch.object(
-            profile_module, "is_windows_platform", return_value=False
+            workspace_skills_module, "is_windows_platform", return_value=False
         ):
             _stdout, stderr = self.run_cli(
                 "profile",
-                "init",
+                "apply",
                 "-d",
                 str(self.root / "target"),
                 "content",
@@ -2835,9 +2935,7 @@ class CliTests(unittest.TestCase):
                 expected=1,
             )
 
-        self.assertIn(
-            "profile init link mode junction is only supported on Windows", stderr
-        )
+        self.assertIn("skill link mode junction is only supported on Windows", stderr)
 
     def test_profile_init_copy_refuses_existing_destination(self) -> None:
         profile_path = self.root / "profiles" / "content" / "config.toml"
@@ -2853,13 +2951,13 @@ class CliTests(unittest.TestCase):
             encoding="utf-8",
         )
         target = self.root / "target"
-        self.run_cli("profile", "init", "-d", str(target), "content", "-cp")
+        self.run_cli("profile", "apply", "-d", str(target), "content", "-cp")
         copied = target / ".agents" / "skills" / "external-one"
         marker = copied / "local-note.md"
         marker.write_text("keep\n", encoding="utf-8")
 
         _stdout, stderr = self.run_cli(
-            "profile", "init", "-d", str(target), "content", "-cp", expected=1
+            "profile", "apply", "-d", str(target), "content", "-cp", expected=1
         )
 
         self.assertIn("refusing to overwrite existing skill destination", stderr)
@@ -2870,7 +2968,7 @@ class CliTests(unittest.TestCase):
             with self.subTest(link_mode=link_mode):
                 _stdout, stderr = self.run_cli(
                     "profile",
-                    "init",
+                    "apply",
                     "-d",
                     str(self.root / "target"),
                     "content",
@@ -2887,7 +2985,7 @@ class CliTests(unittest.TestCase):
     def test_profile_init_copy_long_option_is_not_registered(self) -> None:
         _stdout, stderr = self.run_cli(
             "profile",
-            "init",
+            "apply",
             "-d",
             str(self.root / "target"),
             "content",
@@ -2915,14 +3013,18 @@ class CliTests(unittest.TestCase):
         )
 
         with (
-            mock.patch.object(profile_module, "is_windows_platform", return_value=True),
             mock.patch.object(
-                profile_module.os, "symlink", side_effect=OSError("permission denied")
+                workspace_skills_module, "is_windows_platform", return_value=True
+            ),
+            mock.patch.object(
+                workspace_skills_module.os,
+                "symlink",
+                side_effect=OSError("permission denied"),
             ),
         ):
             _stdout, stderr = self.run_cli(
                 "profile",
-                "init",
+                "apply",
                 "-d",
                 str(self.root / "target"),
                 "content",
@@ -2955,16 +3057,16 @@ class CliTests(unittest.TestCase):
         prompt.unsafe_ask.return_value = selected
         with (
             mock.patch.object(
-                profile_ui_module.QuestionarySkillConflictUI,
+                commands_skill_ui_module.QuestionarySkillConflictUI,
                 "is_interactive",
                 return_value=True,
             ),
             mock.patch.object(
-                profile_ui_module.questionary, "select", return_value=prompt
+                commands_skill_ui_module.questionary, "select", return_value=prompt
             ) as select,
         ):
             stdout, _stderr = self.run_cli(
-                "profile", "init", "-d", str(self.root / "target"), "content"
+                "profile", "apply", "-d", str(self.root / "target"), "content"
             )
 
         installed = self.root / "target" / ".agents" / "skills" / "external-one"
@@ -2996,13 +3098,13 @@ class CliTests(unittest.TestCase):
         )
 
         with mock.patch.object(
-            profile_ui_module.QuestionarySkillConflictUI,
+            commands_skill_ui_module.QuestionarySkillConflictUI,
             "is_interactive",
             return_value=False,
         ):
             _stdout, stderr = self.run_cli(
                 "profile",
-                "init",
+                "apply",
                 "-d",
                 str(self.root / "target"),
                 "content",
@@ -3030,13 +3132,13 @@ class CliTests(unittest.TestCase):
         )
 
         with mock.patch.object(
-            profile_ui_module.QuestionarySkillConflictUI,
+            commands_skill_ui_module.QuestionarySkillConflictUI,
             "is_interactive",
             return_value=False,
         ):
             stdout, stderr = self.run_cli(
                 "profile",
-                "init",
+                "apply",
                 "-d",
                 str(self.root / "target"),
                 "content",
@@ -3090,15 +3192,15 @@ class CliTests(unittest.TestCase):
         prompt.unsafe_ask.return_value = second
         with (
             mock.patch.object(
-                profile_ui_module.QuestionarySkillConflictUI,
+                commands_skill_ui_module.QuestionarySkillConflictUI,
                 "is_interactive",
                 return_value=True,
             ),
             mock.patch.object(
-                profile_ui_module.questionary, "select", return_value=prompt
+                commands_skill_ui_module.questionary, "select", return_value=prompt
             ) as select,
         ):
-            self.run_cli("profile", "init", "-d", str(self.root / "target"), "content")
+            self.run_cli("profile", "apply", "-d", str(self.root / "target"), "content")
 
         choices = select.call_args.kwargs["choices"]
         self.assertEqual(
@@ -3126,17 +3228,17 @@ class CliTests(unittest.TestCase):
         prompt.unsafe_ask.side_effect = OSError("terminal unavailable")
         with (
             mock.patch.object(
-                profile_ui_module.QuestionarySkillConflictUI,
+                commands_skill_ui_module.QuestionarySkillConflictUI,
                 "is_interactive",
                 return_value=True,
             ),
             mock.patch.object(
-                profile_ui_module.questionary, "select", return_value=prompt
+                commands_skill_ui_module.questionary, "select", return_value=prompt
             ),
         ):
             _stdout, stderr = self.run_cli(
                 "profile",
-                "init",
+                "apply",
                 "-d",
                 str(self.root / "target"),
                 "content",
@@ -3165,17 +3267,17 @@ class CliTests(unittest.TestCase):
         prompt.unsafe_ask.return_value = None
         with (
             mock.patch.object(
-                profile_ui_module.QuestionarySkillConflictUI,
+                commands_skill_ui_module.QuestionarySkillConflictUI,
                 "is_interactive",
                 return_value=True,
             ),
             mock.patch.object(
-                profile_ui_module.questionary, "select", return_value=prompt
+                commands_skill_ui_module.questionary, "select", return_value=prompt
             ),
         ):
             _stdout, stderr = self.run_cli(
                 "profile",
-                "init",
+                "apply",
                 "-d",
                 str(self.root / "target"),
                 "content",
@@ -3200,9 +3302,9 @@ class CliTests(unittest.TestCase):
         )
 
         with mock.patch.object(
-            profile_ui_module.QuestionarySkillConflictUI, "select"
+            commands_skill_ui_module.QuestionarySkillConflictUI, "select"
         ) as select:
-            self.run_cli("profile", "init", "-d", str(self.root / "target"), "content")
+            self.run_cli("profile", "apply", "-d", str(self.root / "target"), "content")
 
         installed = self.root / "target" / ".agents" / "skills" / "external-one"
         self.assertEqual(
@@ -3226,7 +3328,7 @@ class CliTests(unittest.TestCase):
         )
         target = self.root / "target"
 
-        stdout, _stderr = self.run_cli("profile", "init", "-d", str(target), "content")
+        stdout, _stderr = self.run_cli("profile", "apply", "-d", str(target), "content")
         self.assertIn("external-one", stdout)
         self.assertTrue((target / ".agents" / "skills" / "external-one").is_symlink())
 
@@ -3247,7 +3349,7 @@ class CliTests(unittest.TestCase):
         )
         target = self.root / "target"
 
-        stdout, _stderr = self.run_cli("profile", "init", "-d", str(target), "content")
+        stdout, _stderr = self.run_cli("profile", "apply", "-d", str(target), "content")
         self.assertIn("external-one", stdout)
         self.assertNotIn("external-two", stdout)
         self.assertTrue((target / ".agents" / "skills" / "external-one").is_symlink())
@@ -3366,7 +3468,7 @@ class CliTests(unittest.TestCase):
         invocation_cwd = self.root / "consumer"
         invocation_cwd.mkdir()
 
-        with mock.patch.object(cli.Path, "home", return_value=home):
+        with mock.patch.object(Path, "home", return_value=home):
             self.run_cli("skill", "add", "local-one", "--global", cwd=invocation_cwd)
 
         destination = home / ".agents" / "skills" / "local-one"
@@ -3397,8 +3499,9 @@ class CliTests(unittest.TestCase):
     def test_skill_add_rejects_source_only_wildcard_and_ambiguous_references(
         self,
     ) -> None:
-        _stdout, stderr = self.run_cli("skill", "add", "local-source", expected=1)
-        self.assertIn("skill add requires one skill, not source: local-source", stderr)
+        stdout, stderr = self.run_cli("skill", "add", "local-source")
+        self.assertEqual(stderr, "")
+        self.assertIn("external-one", stdout)
 
         self.write_skill(self.root / "local-source" / "other" / "external-two")
         _stdout, stderr = self.run_cli("skill", "add", "local-source:*", expected=1)
@@ -3418,10 +3521,11 @@ class CliTests(unittest.TestCase):
         self.assertIn("unknown source or skill: missing", stderr)
 
         self.append_remote_source("remote-source")
-        _stdout, stderr = self.run_cli(
-            "skill", "add", "remote-source:missing", expected=1
+        stdout, stderr = self.run_cli(
+            "skill", "add", "remote-source:missing", "--dry-run"
         )
-        self.assertIn("source path does not exist; run hgc source sync first", stderr)
+        self.assertIn("not yet verified", stdout)
+        self.assertEqual(stderr, "")
 
     def test_skill_add_is_idempotent_retargets_links_and_refuses_real_destinations(
         self,
@@ -3470,9 +3574,11 @@ class CliTests(unittest.TestCase):
         invocation_cwd.mkdir()
 
         with (
-            mock.patch.object(profile_module, "is_windows_platform", return_value=True),
             mock.patch.object(
-                profile_module, "create_windows_junction"
+                workspace_skills_module, "is_windows_platform", return_value=True
+            ),
+            mock.patch.object(
+                workspace_skills_module, "create_windows_junction"
             ) as create_junction,
         ):
             self.run_cli("skill", "add", "external-one", cwd=invocation_cwd)
@@ -3616,7 +3722,8 @@ class CliTests(unittest.TestCase):
         _stdout, stderr = self.run_cli(
             "skill", "list", "-s", "remote-source", expected=1
         )
-        self.assertIn("source path does not exist; run hgc source sync first", stderr)
+        self.assertIn("source path does not exist:", stderr)
+        self.assertIn("run: hgc source sync remote-source", stderr)
 
         _stdout, stderr = self.run_cli("skill", "list", "-p", "missing", expected=1)
         self.assertIn("missing config:", stderr)
@@ -3651,7 +3758,7 @@ class CliTests(unittest.TestCase):
         )
 
         _stdout, stderr = self.run_cli(
-            "profile", "init", "-d", str(self.root / "target"), "content", expected=1
+            "profile", "apply", "-d", str(self.root / "target"), "content", expected=1
         )
         self.assertIn("legacy [[skills]]", stderr)
 

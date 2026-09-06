@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .common import die, expand_path, render_toml, write_toml
+from hagency_cli.paths import expand_path
+from hagency_cli.workspace.config import render_toml, write_toml
+from hagency_cli.workspace.errors import fail
+from hagency_cli.workspace.events import Progress, emit_event
 
 HAGENCY_CONFIG_NAME = "hagency-config.toml"
 
@@ -21,7 +24,7 @@ def _find_workspace_root(start: Path) -> Path | None:
 
 def _installed_workspace_root() -> Path | None:
     module = Path(__file__).resolve()
-    source_path = Path("tools/hagency-cli/src/hagency_cli/workspace.py")
+    source_path = Path("tools/hagency-cli/src/hagency_cli/workspace/discovery.py")
     if module.parts[-len(source_path.parts) :] != source_path.parts:
         return None
     root = module.parents[len(source_path.parts) - 1]
@@ -34,7 +37,7 @@ def resolve_workspace_root(value: str | None, cwd: Path) -> Path:
         root = expand_path(value, cwd).resolve()
         config = workspace_config_path(root)
         if not config.exists():
-            die(f"missing workspace config: {config}")
+            fail(f"missing workspace config: {config}")
         return root
 
     start = cwd.resolve()
@@ -46,23 +49,31 @@ def resolve_workspace_root(value: str | None, cwd: Path) -> Path:
     if installed_root is not None:
         return installed_root
 
-    die(f"not a hagency workspace: {start}")
+    fail(f"not a hagency workspace: {start}")
 
 
-def init_workspace(value: str | None, cwd: Path, *, force: bool, dry_run: bool) -> None:
+def init_workspace(
+    value: str | None,
+    cwd: Path,
+    *,
+    force: bool,
+    dry_run: bool,
+    progress: Progress | None = None,
+) -> Path:
     root = expand_path(value, cwd).resolve() if value else cwd.resolve()
     config = workspace_config_path(root)
     data = {"defaults": {"checkout_dir": "~/Projects/references", "depth": 1}}
 
     if config.exists() and not force:
-        die(f"workspace config already exists: {config}")
+        fail(f"workspace config already exists: {config}")
 
     if dry_run:
         action = "overwrite" if config.exists() else "create"
-        print(f"Would {action} workspace config: {config}")
-        print(render_toml(data).rstrip())
-        return
+        emit_event(progress, f"Would {action} workspace config: {config}")
+        emit_event(progress, render_toml(data).rstrip())
+        return root
 
     root.mkdir(parents=True, exist_ok=True)
     write_toml(config, data)
-    print(f"initialized hagency workspace: {root}")
+    emit_event(progress, f"initialized hagency workspace: {root}")
+    return root

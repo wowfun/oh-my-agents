@@ -21,7 +21,6 @@ from hagency_cli.model_proxy import (
     ModelProxyConfigError,
     ProviderAdapter,
     ProviderAdapterError,
-    create_model_proxy_app,
     load_proxy_config,
 )
 from hagency_cli.model_proxy.conversion import (
@@ -36,6 +35,7 @@ from hagency_cli.model_proxy.providers import (
     PROTOCOL_CHAT,
     PROTOCOL_RESPONSES,
 )
+from hagency_cli.model_proxy.server import create_model_proxy_app
 from hagency_cli.model_proxy.sse import SseDecoder, SseEvent, encode_event, json_event
 
 

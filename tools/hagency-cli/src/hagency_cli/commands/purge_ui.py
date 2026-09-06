@@ -5,19 +5,8 @@ from pathlib import Path
 
 import questionary
 
-from .purge import PurgeChoice
-
-
-def _format_bytes(value: int) -> str:
-    size = float(max(value, 0))
-    units = ("B", "KiB", "MiB", "GiB", "TiB")
-    for unit in units:
-        if size < 1024 or unit == units[-1]:
-            if unit == "B":
-                return f"{int(size)} {unit}"
-            return f"{size:.1f} {unit}"
-        size /= 1024
-    raise AssertionError("unreachable")
+from hagency_cli.commands.purge_render import format_bytes
+from hagency_cli.files.purge.models import PurgeChoice
 
 
 class QuestionaryPurgeUI:
@@ -58,7 +47,7 @@ class QuestionaryPurgeUI:
             print(f"  {path}")
         prompt = questionary.confirm(
             f"Remove {len(paths)} selected artifact(s) "
-            f"({_format_bytes(known_bytes)} known size)?",
+            f"({format_bytes(known_bytes)} known size)?",
             default=False,
         )
         try:

@@ -33,7 +33,6 @@ from .providers import (
     ProviderAdapterError,
     load_provider_adapter,
 )
-from .server import create_model_proxy_app, run_model_proxy
 
 __all__ = [
     "AuthPatch",
@@ -58,11 +57,9 @@ __all__ = [
     "ResponsePatch",
     "ServicePaths",
     "ServiceState",
-    "create_model_proxy_app",
     "load_proxy_config",
     "load_provider_adapter",
     "restart_model_proxy",
-    "run_model_proxy",
     "start_model_proxy",
     "stop_model_proxy",
 ]

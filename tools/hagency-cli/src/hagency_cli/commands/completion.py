@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import contextlib
-import io
 import os
 import shlex
 from collections import Counter
@@ -11,21 +9,19 @@ from typing import Iterable
 
 import typer
 
-from .common import expand_path, read_toml
-from .profiles import discover_skill_dirs, source_relative_selector, workspace_source
-from .sources import Source, resolve_sources
-from .workspace import resolve_workspace_root, workspace_config_path
-
-
-@dataclass(frozen=True)
-class SkillCandidate:
-    source_name: str
-    name: str
-    selector: str
-
-    @property
-    def reference(self) -> str:
-        return f"{self.source_name}:{self.selector}"
+from hagency_cli.paths import expand_path
+from hagency_cli.workspace.catalog import SkillCatalogEntry, discover_catalog
+from hagency_cli.workspace.config import read_toml
+from hagency_cli.workspace.discovery import (
+    resolve_workspace_root,
+    workspace_config_path,
+)
+from hagency_cli.workspace.source_inputs import (
+    classify_skill_input,
+    is_explicit_path,
+    remote_identity,
+)
+from hagency_cli.workspace.sources import Source, resolve_sources
 
 
 @dataclass(frozen=True)
@@ -33,7 +29,7 @@ class CompletionCatalog:
     root: Path
     sources: dict[str, Source]
     profiles: tuple[str, ...]
-    skills: tuple[SkillCandidate, ...]
+    skills: tuple[SkillCatalogEntry, ...]
 
 
 def _raw_option_value(*names: str) -> str | None:
@@ -61,19 +57,21 @@ def _context_value(ctx: typer.Context, key: str, *option_names: str) -> str | No
 def _quiet_catalog(ctx: typer.Context) -> CompletionCatalog | None:
     root_value = _context_value(ctx, "root", "--root", "-r")
     checkout_dir = _context_value(ctx, "checkout_dir", "--checkout-dir")
-    sink = io.StringIO()
     try:
-        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
-            root = resolve_workspace_root(root_value, Path.cwd())
-            registry = read_toml(workspace_config_path(root))
-            sources = resolve_sources(registry, repo_root=root, checkout_override=checkout_dir)
-            profiles = _profile_names(root)
-            skills = _skill_candidates(root, sources)
-    except (Exception, SystemExit):
+        root = resolve_workspace_root(root_value, Path.cwd())
+        registry = read_toml(workspace_config_path(root))
+        sources = resolve_sources(
+            registry, repo_root=root, checkout_override=checkout_dir
+        )
+        profiles = _profile_names(root)
+        skills = _skill_candidates(root, sources)
+    except Exception:
         # Completion is best-effort and must stay silent for malformed or
         # inaccessible workspace data.
         return None
-    return CompletionCatalog(root=root, sources=sources, profiles=profiles, skills=skills)
+    return CompletionCatalog(
+        root=root, sources=sources, profiles=profiles, skills=skills
+    )
 
 
 def _profile_names(root: Path) -> tuple[str, ...]:
@@ -82,27 +80,17 @@ def _profile_names(root: Path) -> tuple[str, ...]:
         return ()
     return tuple(
         path.parent.name
-        for path in sorted(profiles_root.glob("*/config.toml"), key=lambda item: item.parent.name)
+        for path in sorted(
+            profiles_root.glob("*/config.toml"), key=lambda item: item.parent.name
+        )
         if path.is_file()
     )
 
 
-def _skill_candidates(root: Path, sources: dict[str, Source]) -> tuple[SkillCandidate, ...]:
-    candidates: list[SkillCandidate] = []
-    source_roots = {source.path for source in sources.values()}
-    for source_name, source in (("workspace", workspace_source(root)), *sources.items()):
-        if not source.path.is_dir():
-            continue
-        skip_roots = source_roots if source_name == "workspace" else None
-        for target in discover_skill_dirs(source.path, skip_roots=skip_roots):
-            candidates.append(
-                SkillCandidate(
-                    source_name=source_name,
-                    name=target.name,
-                    selector=source_relative_selector(source, target),
-                )
-            )
-    return tuple(sorted(candidates, key=lambda item: (item.source_name, item.selector, item.name)))
+def _skill_candidates(
+    root: Path, sources: dict[str, Source]
+) -> tuple[SkillCatalogEntry, ...]:
+    return discover_catalog(root, sources)
 
 
 def _used_values(ctx: typer.Context) -> set[str]:
@@ -136,13 +124,25 @@ def _reference_values(
     source_names: set[str] | None = None,
     include_sources: bool,
 ) -> list[tuple[str, str]]:
-    skills = [skill for skill in catalog.skills if source_names is None or skill.source_name in source_names]
+    skills = [
+        skill
+        for skill in catalog.skills
+        if source_names is None or skill.source_name in source_names
+    ]
     name_counts = Counter(skill.name for skill in skills)
     values: list[tuple[str, str]] = []
     if include_sources:
-        names = source_names if source_names is not None else {"workspace", *catalog.sources}
+        names = (
+            source_names
+            if source_names is not None
+            else {"workspace", *catalog.sources}
+        )
         values.extend((name, "source") for name in names)
-    values.extend((skill.name, f"skill from {skill.source_name}") for skill in skills if name_counts[skill.name] == 1)
+    values.extend(
+        (skill.name, f"skill from {skill.source_name}")
+        for skill in skills
+        if name_counts[skill.name] == 1
+    )
     values.extend((skill.reference, "exact skill selector") for skill in skills)
     return values
 
@@ -158,7 +158,9 @@ def complete_source(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]
     )
 
 
-def complete_source_or_workspace(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]]:
+def complete_source_or_workspace(
+    ctx: typer.Context, incomplete: str
+) -> list[tuple[str, str]]:
     catalog = _quiet_catalog(ctx)
     if catalog is None:
         return []
@@ -177,30 +179,34 @@ def complete_profile(ctx: typer.Context, incomplete: str) -> list[tuple[str, str
 
 
 def complete_skill_add(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]]:
-    catalog = _quiet_catalog(ctx)
-    if catalog is None:
-        return []
-    return _items(_reference_values(catalog, include_sources=False), incomplete)
-
-
-def complete_skill_reference(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]]:
+    if is_explicit_path(incomplete):
+        return complete_directory(incomplete)
     catalog = _quiet_catalog(ctx)
     if catalog is None:
         return []
     return _items(_reference_values(catalog, include_sources=True), incomplete)
 
 
-def complete_profile_remove_reference(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]]:
+def complete_skill_reference(
+    ctx: typer.Context, incomplete: str
+) -> list[tuple[str, str]]:
+    catalog = _quiet_catalog(ctx)
+    if catalog is None:
+        return []
+    return _items(_reference_values(catalog, include_sources=True), incomplete)
+
+
+def complete_profile_remove_reference(
+    ctx: typer.Context, incomplete: str
+) -> list[tuple[str, str]]:
     catalog = _quiet_catalog(ctx)
     profile_name = ctx.params.get("name") or _raw_profile_name()
     if catalog is None or not isinstance(profile_name, str):
         return []
-    sink = io.StringIO()
     try:
-        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
-            profile = read_toml(catalog.root / "profiles" / profile_name / "config.toml")
+        profile = read_toml(catalog.root / "profiles" / profile_name / "config.toml")
         source_names = set(profile.get("skill", {}))
-    except (Exception, SystemExit):
+    except Exception:
         return []
     return _items(
         _reference_values(catalog, source_names=source_names, include_sources=True),
@@ -260,13 +266,26 @@ def _reference_source(catalog: CompletionCatalog, reference: str) -> str | None:
 
 
 def complete_directory(incomplete: str) -> list[tuple[str, str]]:
+    return _complete_path(incomplete, directories_only=True)
+
+
+def complete_file(incomplete: str) -> list[tuple[str, str]]:
+    return _complete_path(incomplete, directories_only=False)
+
+
+def _complete_path(incomplete: str, *, directories_only: bool) -> list[tuple[str, str]]:
     raw = incomplete or "./"
     expanded = expand_path(raw, Path.cwd())
     directory = expanded if raw.endswith(("/", "\\")) else expanded.parent
     name_prefix = "" if raw.endswith(("/", "\\")) else expanded.name
     try:
         children = sorted(
-            (child for child in directory.iterdir() if child.is_dir() and child.name.startswith(name_prefix)),
+            (
+                child
+                for child in directory.iterdir()
+                if (not directories_only or child.is_dir())
+                and child.name.startswith(name_prefix)
+            ),
             key=lambda child: child.name,
         )
     except OSError:
@@ -276,6 +295,76 @@ def complete_directory(incomplete: str) -> list[tuple[str, str]]:
     if raw_parent == ".":
         raw_parent = ""
     return [
-        (str(Path(raw_parent) / child.name) + os.sep, "directory")
+        (
+            str(Path(raw_parent) / child.name) + (os.sep if child.is_dir() else ""),
+            "directory" if child.is_dir() else "file",
+        )
         for child in children
     ]
+
+
+def complete_install_selector(
+    ctx: typer.Context, incomplete: str
+) -> list[tuple[str, str]]:
+    catalog = _quiet_catalog(ctx)
+    reference = ctx.params.get("skill") or _raw_skill_input()
+    if catalog is None or not isinstance(reference, str):
+        return []
+    try:
+        parsed = classify_skill_input(reference, catalog.sources)
+        if parsed.kind == "source":
+            skills = [s for s in catalog.skills if s.source_name == parsed.value]
+        elif parsed.kind == "path":
+            path = expand_path(parsed.value, Path.cwd()).resolve()
+            skills = [s for s in catalog.skills if s.path.is_relative_to(path)]
+        elif parsed.kind == "url":
+            names = {
+                s.name
+                for s in catalog.sources.values()
+                if s.remote
+                and remote_identity(s.remote.url) == remote_identity(parsed.value)
+            }
+            skills = [s for s in catalog.skills if s.source_name in names]
+        else:
+            return []
+    except Exception:
+        return []
+    return _items(
+        ((s.selector, s.name) for s in skills), incomplete, excluded=_used_values(ctx)
+    )
+
+
+def _raw_skill_input() -> str | None:
+    """Click may leave positional arguments unset during option completion."""
+    try:
+        words = shlex.split(os.environ.get("COMP_WORDS", ""))
+        start = words.index("skill")
+    except ValueError:
+        return None
+    if words[start + 1 : start + 2] != ["add"]:
+        return None
+    value_options = {
+        "--root",
+        "-r",
+        "--path",
+        "-p",
+        "--dir",
+        "-d",
+        "--checkout-dir",
+        "--skill",
+        "-s",
+        "--source-name",
+        "--ref",
+    }
+    index = start + 2
+    while index < len(words):
+        word = words[index]
+        if word == "--":
+            return words[index + 1] if index + 1 < len(words) else None
+        if word in value_options:
+            index += 2
+        elif word.startswith("-"):
+            index += 1
+        else:
+            return word
+    return None

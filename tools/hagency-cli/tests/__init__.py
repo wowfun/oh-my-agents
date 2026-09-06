@@ -1,0 +1,1 @@
+"""Hagency CLI regression tests."""
